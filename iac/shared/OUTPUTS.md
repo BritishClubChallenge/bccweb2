@@ -11,7 +11,7 @@ consumers and `scripts/iac/check-shared-resource-contract.sh` in the same change
 | `acs_id` | Resource ID of the shared Azure Communication Service. | Stamp-consumed for ACS access and configuration. |
 | `acs_email_domain_id` | Resource ID of the shared customer-managed ACS email domain. | Deploy-workflow/operator-consumed for email-domain verification and inspection. |
 | `acs_sender_address` | Public sender address configured for the shared ACS email domain. | Stamp-consumed as the application sender address. |
-| `acs_dns_records_for_operator` | Registrar-ready ACS domain ownership, SPF, DKIM, DKIM2, and DMARC verification records. | Deploy-workflow/operator-consumed during email-domain verification. |
+| `acs_dns_records_for_operator` | ACS domain ownership, SPF, DKIM, and DKIM2 verification records for the operator to publish (in the delegated Azure DNS zone, or at the registrar if the email domain is not DNS-delegated to Azure). `dmarc` may be `null` — ACS does not always return it, and unlike the other four keys it is not itself an ACS verification record; see `docs/runbooks/dns-cutover.md`. | Deploy-workflow/operator-consumed during email-domain verification. |
 | `swa_name` | Frozen name of the shared Standard Static Web App. | Deploy-workflow/operator-consumed for SPA deployment. |
 | `swa_default_hostname` | Azure-assigned production hostname of the shared Static Web App. | Deploy-workflow/operator-consumed for deployment and DNS verification. |
 | `swa_id` | Resource ID of the shared Static Web App. | Deploy-workflow/operator-consumed for topology and deployment integration. |
