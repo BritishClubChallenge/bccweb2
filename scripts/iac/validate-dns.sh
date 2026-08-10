@@ -11,7 +11,8 @@ set -euo pipefail
 #      reachable).
 #   3. The API health endpoint returns { status: "ok" }.
 #   4. (Optional) ACS email domain SPF / DKIM / DMARC TXT records are present
-#      at the registrar.
+#      via public DNS resolution — published in the delegated Azure DNS zone
+#      email.matt-ffffff.com (resource group rg-dns), not at the registrar.
 #
 # Usage:
 #   PROD_HOST=bcc.flyparagliding.org.uk \
