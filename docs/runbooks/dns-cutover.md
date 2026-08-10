@@ -160,7 +160,7 @@ For each record from `terraform -chdir=iac/shared output acs_dns_records_for_ope
      --record-set-name "$NAME" --value "$VALUE"
    ```
    Wait for the Azure portal (Communication Services > Domains) to mark the domain Verified.
-2. **`spf`** (mode `apex` — TXT, value typically `v=spf1 include:azurecomm.net -all`). Only one `v=spf1` TXT value is allowed per host, and it shares the same apex record set as `domain_ownership` above, so **never blindly `add-record`** — query the existing set first and fail closed if a `v=spf1` value is already there:
+2. **`spf`** (mode `apex` — TXT). Publish the exact value ACS returns in `acs_dns_records_for_operator` — do **not** hard-code an `include:`. ACS emits a provider-specific include (e.g. `v=spf1 include:spf.protection.outlook.com -all` for Microsoft 365-backed domains, or `include:azurecomm.net` for others), so always read `.spf.value` from the Terraform output rather than typing one. Only one `v=spf1` TXT value is allowed per host, and it shares the same apex record set as `domain_ownership` above, so **never blindly `add-record`** — query the existing set first and fail closed if a `v=spf1` value is already there:
    ```bash
    SPF_VALUE=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r '.spf.value')
    SPF_RAW_NAME=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r '.spf.name')
@@ -178,7 +178,7 @@ For each record from `terraform -chdir=iac/shared output acs_dns_records_for_ope
      echo "  current : $EXISTING_SPF" >&2
      echo "  required: $SPF_VALUE" >&2
      echo "Only one v=spf1 record is allowed per host - manually merge the" >&2
-     echo "'include:azurecomm.net' clause into the existing value (or replace" >&2
+     echo "ACS-required include: clause into the existing value (or replace" >&2
      echo "it) instead of appending a second v=spf1 record." >&2
      exit 1
    fi
@@ -206,6 +206,12 @@ For each record from `terraform -chdir=iac/shared output acs_dns_records_for_ope
        --record-set-name "$NAME" --cname "$VALUE"
    done
    ```
+   Note: ACS's `verificationRecords` report a `ttl` of `3600` for the DKIM
+   CNAMEs. If you want the 300s recovery window during the verification
+   window, the `--ttl 300` on `create` above sets it, but a later portal or
+   ACS-driven refresh of these records may reassert `3600`; re-check with
+   `dig +noall +answer <selector>._domainkey.<domain>` and lower it again if
+   needed.
 4. **`dmarc`** — **not** an ACS verification record: ACS frequently omits it (`iac/shared/acs.tf`'s `try(local.acs_verification_records.DMARC, null)` is `null` today for this domain). It's an operator-authored deliverability policy at `_dmarc.<domain>` that you publish regardless of what ACS returns — never pass a JSON `null` to the Azure CLI:
    ```bash
    DMARC_JSON=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -c '.dmarc')
