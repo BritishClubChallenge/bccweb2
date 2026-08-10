@@ -2,8 +2,19 @@
 
 This runbook covers two intertwined DNS changes that ship together at production cutover:
 
-1. **ACS email domain verification and activation** — publish SPF, DKIM, DKIM2 and DMARC records at the registrar, wait for Azure verification, then enable the committed domain-link toggle so outbound mail is deliverable.
+1. **ACS email domain verification and activation** — publish SPF, DKIM, DKIM2 and DMARC records in the delegated Azure DNS child zone `email.matt-ffffff.com` (resource group `rg-dns`), wait for Azure verification, then enable the committed domain-link toggle so outbound mail is deliverable.
 2. **Production CNAME flip** — point the public hostname (e.g. `bcc.flyparagliding.org.uk`) at the Azure Static Web App default hostname.
+
+> **ACS email domain is on delegated Azure DNS, not the registrar.** GoDaddy
+> (the domain's registrar) only holds NS delegation records for
+> `email.matt-ffffff.com` — `ns1-03.azure-dns.com`, `ns2-03.azure-dns.net`,
+> `ns3-03.azure-dns.org`, `ns4-03.azure-dns.info`. The zone itself, and every
+> ACS verification record inside it (domain ownership TXT, SPF TXT, DKIM/DKIM2
+> CNAME), plus the operator-authored DMARC TXT record, is published in Azure DNS zone `email.matt-ffffff.com`
+> in resource group `rg-dns` — see "ACS email domain verification" below for
+> the exact `az network dns record-set` commands. This is distinct from the
+> production CNAME flip above, which continues to follow whichever registrar
+> or DNS host serves `production_hostname`.
 
 The two changes are independent in DNS but conventionally done in the same operator session. The TTL strategy below applies to both.
 
@@ -29,12 +40,17 @@ The two changes are independent in DNS but conventionally done in the same opera
  terraform -chdir=iac/shared output -raw swa_name
    ```
    `acs_dns_records_for_operator` exposes lowercase `domain_ownership`, `spf`,
-   `dkim`, `dkim2`, and `dmarc` keys. Each value is Azure's record object;
-   use its returned `type`, `name`, and `value` fields at the registrar. For
-   automation, print tab-separated fields with:
+   `dkim`, `dkim2`, and `dmarc` keys. Not every key is guaranteed to be
+   present or shaped the same way — see "ACS email domain verification"
+   below for the live-evidence caveats (name shape varies per key, and
+   `dmarc` can be `null`). Each present value is Azure's record object;
+   use its returned `type`, `name`, and `value` fields to publish the record
+   in the delegated Azure DNS zone `email.matt-ffffff.com` (resource group
+   `rg-dns`) — see "ACS email domain verification" below. For
+   automation, print tab-separated fields for only the non-null entries:
    ```bash
    terraform -chdir=iac/shared output -json acs_dns_records_for_operator |
-     jq -r 'to_entries[] | [.key, .value.type, .value.name, .value.value] | @tsv'
+     jq -r 'to_entries[] | select(.value != null) | [.key, .value.type, .value.name, .value.value] | @tsv'
    ```
 3. `swa_default_hostname` is the stable SWA default hostname (e.g.
    `nice-stone-0a1b2c3d4.azurestaticapps.net`) to use as the CNAME target at the
@@ -62,21 +78,116 @@ Apply the same TTL schedule to the ACS SPF / DKIM / DMARC TXT records during the
 
 ## ACS email domain verification
 
-For each record returned by `terraform -chdir=iac/shared output acs_dns_records_for_operator`:
+The `email.matt-ffffff.com` zone is a **delegated Azure DNS child zone**: the
+registrar (GoDaddy) holds only the four NS delegation records for that
+subdomain (`ns1-03.azure-dns.com`, `ns2-03.azure-dns.net`,
+`ns3-03.azure-dns.org`, `ns4-03.azure-dns.info`), and the zone itself lives in
+Azure DNS, in resource group `rg-dns`. Every record below is published
+directly into that Azure DNS zone with `az network dns record-set` — never
+at the registrar.
 
-1. **`domain_ownership`** — a TXT record proving you control the domain. Paste `name` and `value` at the registrar. Wait for the Azure portal under the Communication Services > Domains blade to mark the domain Verified.
-2. **`spf`** — TXT, value typically `v=spf1 include:azurecomm.net -all`. If the apex already has an SPF, merge the `include:azurecomm.net` clause rather than publishing a second SPF record (only one v=spf1 record is allowed per host).
-3. **`dkim`** and **`dkim2`** — CNAME records under `selector1-azurecomm-prod-net._domainkey.<your-domain>` and `selector2-azurecomm-prod-net._domainkey.<your-domain>` pointing at Azure-managed targets.
-4. **`dmarc`** — use the returned TXT `name` and `value`. For first cutover,
-   ensure the policy in the value is `p=none`; this is an operator policy,
-   not a separate Terraform recommendation output. Tighten to
-   `p=quarantine` after one clean week of DMARC aggregate reports, and to
-   `p=reject` only after a second clean week.
-5. After Azure reports every required domain check as Verified, set
-   `link_acs_email_domain = true` in `iac/env/shared.tfvars`, commit it through
-   review, and run the shared Terraform apply workflow. Confirm the final plan
-   changes only `acs-bccweb-shared.properties.linkedDomains` and that the apply
-   succeeds before treating outbound mail as enabled.
+**Record-name handling.** Live ACS `verificationRecords` evidence for this
+domain shows `name` in two shapes: `domain_ownership`/`spf` return the full
+zone-apex FQDN (`email.matt-ffffff.com`); `dkim`/`dkim2` return an
+already-relative selector (`selector1-azurecomm-prod-net._domainkey`, which
+itself contains a dot — a dot-count check cannot tell a legitimate
+multi-label relative name from an absolute one, so don't use one). Azure
+CLI's `--record-set-name` always wants a zone-relative name, so normalize
+per-key with the record's *known* shape rather than guessing from string
+shape alone:
+
+```bash
+ZONE_NAME="email.matt-ffffff.com"
+ZONE_RG="rg-dns"
+
+# mode "apex": the key is documented to return the zone apex or a subdomain
+# of it (domain_ownership, spf). Anything else fails closed.
+# mode "relative": the key is documented to already return a zone-relative
+# name (dkim, dkim2). Only an unambiguous absolute marker (trailing dot)
+# fails closed; this does not attempt to detect every possible foreign FQDN.
+normalize_record_name() {
+  local name="$1" zone="$2" mode="$3"
+  case "$mode" in
+    apex)
+      case "$name" in
+        "$zone") printf '%s\n' "@" ;;
+        *".${zone}") printf '%s\n' "${name%".${zone}"}" ;;
+        *) echo "ERROR: '$name' is not '$zone' or a subdomain of it - refusing to guess" >&2; return 1 ;;
+      esac
+      ;;
+    relative)
+      case "$name" in
+        *.) echo "ERROR: '$name' ends with a trailing dot (absolute) - refusing to guess" >&2; return 1 ;;
+        "$zone") printf '%s\n' "@" ;;
+        *".${zone}") printf '%s\n' "${name%".${zone}"}" ;;
+        *) printf '%s\n' "$name" ;;
+      esac
+      ;;
+    *) echo "ERROR: unknown mode '$mode'" >&2; return 1 ;;
+  esac
+}
+```
+
+For each record from `terraform -chdir=iac/shared output acs_dns_records_for_operator`:
+
+1. **`domain_ownership`** and **`spf`** (mode `apex` — TXT; `spf` value typically `v=spf1 include:azurecomm.net -all`; merge into an existing apex SPF record rather than adding a second one):
+   ```bash
+   for key in domain_ownership spf; do
+     RAW_NAME=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r ".$key.name")
+     VALUE=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r ".$key.value")
+     NAME=$(normalize_record_name "$RAW_NAME" "$ZONE_NAME" apex)
+     az network dns record-set txt add-record \
+       --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
+       --record-set-name "$NAME" --value "$VALUE"
+   done
+   ```
+   Wait for the Azure portal (Communication Services > Domains) to mark the domain Verified.
+2. **`dkim`** and **`dkim2`** (mode `relative` — CNAME, under `selectorN-azurecomm-prod-net._domainkey`, pointing at Azure-managed targets):
+   ```bash
+   for key in dkim dkim2; do
+     RAW_NAME=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r ".$key.name")
+     VALUE=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r ".$key.value")
+     NAME=$(normalize_record_name "$RAW_NAME" "$ZONE_NAME" relative)
+     az network dns record-set cname set-record \
+       --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
+       --record-set-name "$NAME" --cname "$VALUE"
+   done
+   ```
+3. **`dmarc`** — **not** an ACS verification record: ACS frequently omits it (`iac/shared/acs.tf`'s `try(local.acs_verification_records.DMARC, null)` is `null` today for this domain). It's an operator-authored deliverability policy at `_dmarc.<domain>` that you publish regardless of what ACS returns — never pass a JSON `null` to the Azure CLI:
+   ```bash
+   DMARC_JSON=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -c '.dmarc')
+   if [[ "$DMARC_JSON" != "null" ]]; then
+     NAME=$(normalize_record_name "$(jq -r '.name' <<<"$DMARC_JSON")" "$ZONE_NAME" apex)
+     VALUE=$(jq -r '.value' <<<"$DMARC_JSON")
+   else
+     NAME="_dmarc"; VALUE="v=DMARC1; p=none"   # author your own first-cutover policy
+   fi
+   az network dns record-set txt add-record \
+     --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
+     --record-set-name "$NAME" --value "$VALUE"
+   ```
+   Ensure `p=none` for first cutover; tighten to `p=quarantine` after one clean week of DMARC aggregate reports, and `p=reject` only after a second clean week.
+4. After Azure reports every domain check Verified, set `link_acs_email_domain = true` in `iac/env/shared.tfvars`, commit through review, and run the shared Terraform apply. Confirm the plan changes only `acs-bccweb-shared.properties.linkedDomains` before treating outbound mail as enabled.
+
+Alternatively, publish each record from the Azure Portal: **Resource groups >
+`rg-dns` > `email.matt-ffffff.com` (DNS zone) > + Record set**, choosing
+record type `TXT` or `CNAME` to match the key above, and pasting the same
+`name`/`value` pair read from `acs_dns_records_for_operator`.
+
+**Propagating a changed sender address:** if `acs_sender_address` changes in
+`iac/env/shared.tfvars` (for example, after moving the ACS domain), the
+shared apply above updates the shared root's `acs_sender_address` output, but
+`iac/environment` reads that output into `ACS_SENDER_ADDRESS` on each
+environment's Function App independently — a shared apply alone does not
+touch either environment's app settings. Apply **both** `staging` and `prod`
+after the shared apply completes, in either order:
+```bash
+gh workflow run terraform.yml -f env=staging -f action=apply
+gh workflow run terraform.yml -f env=prod -f action=apply
+```
+Domain linkage (`link_acs_email_domain = true`, step 4 above) still stays a
+separate, later shared-only apply, run only after verification — it does not
+require a follow-up environment apply.
 
 **DMARC policy progression — non-negotiable for first deployment:**
 
@@ -203,7 +314,7 @@ If the production CNAME flip causes issues:
 3. Investigate via Application Insights `requests` / `exceptions` tables (T46/T47 alerts already wired in).
 4. Do **not** raise TTL back to 3600s until you have a confirmed fix and a fresh successful cutover.
 
-ACS email DNS records can be left in place — they are additive and do not affect web traffic. If a DKIM/DMARC value was wrong, simply update the TXT/CNAME at the registrar; the 300s TTL gets you a 5-minute recovery window for mail deliverability too.
+ACS email DNS records can be left in place — they are additive and do not affect web traffic. If a DKIM/DMARC value was wrong, simply update the TXT/CNAME record in the Azure DNS zone `email.matt-ffffff.com` (resource group `rg-dns`) with `az network dns record-set txt update` / `cname set-record`; the 300s TTL gets you a 5-minute recovery window for mail deliverability too.
 
 ## Sign-off
 
