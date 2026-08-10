@@ -176,7 +176,7 @@ SWA_HOST="$(terraform -chdir=iac/shared output -raw swa_default_hostname)"
 PROD_HOST=bcc.flyparagliding.org.uk \
 SWA_HOST="$SWA_HOST" \
 API_HOST=func-bccweb-prod.azurewebsites.net \
-ACS_EMAIL_DOMAIN=home.matt-ffffff.com \
+ACS_EMAIL_DOMAIN=email.matt-ffffff.com \
   bash scripts/iac/validate-dns.sh
 ```
 

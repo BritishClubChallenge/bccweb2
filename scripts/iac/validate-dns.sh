@@ -17,7 +17,7 @@ set -euo pipefail
 #   PROD_HOST=bcc.flyparagliding.org.uk \
 #   SWA_HOST=nice-stone-0a1b2c3d4.azurestaticapps.net \
 #   API_HOST=func-bccweb-prod.azurewebsites.net \
-#   ACS_EMAIL_DOMAIN=home.matt-ffffff.com \
+#   ACS_EMAIL_DOMAIN=email.matt-ffffff.com \
 #     bash scripts/iac/validate-dns.sh
 #
 # Set CHECK_ACS_DNS=0 to skip the SPF/DKIM/DMARC TXT lookups when the email
