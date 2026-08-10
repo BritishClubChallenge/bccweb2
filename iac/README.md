@@ -154,12 +154,21 @@ Follow these steps to provision the topology from scratch.
     shared SWA serves stable environment deployments and PR previews while
     deploy automation maps each environment's Function App backend to it.
 
-    After the shared apply, register the registrar DNS records printed by
-    `terraform -chdir=iac/shared output acs_dns_records_for_operator` so
-    Azure Communication Services can verify the email domain. Once Azure
+    After the shared apply, publish the DNS records printed by
+    `terraform -chdir=iac/shared output acs_dns_records_for_operator` into the
+    delegated Azure DNS child zone `email.matt-ffffff.com` (resource group
+    `rg-dns`) — not at the registrar; GoDaddy only holds the NS delegation
+    records for that subdomain — so Azure Communication Services can verify
+    the email domain. See
+    [environment/README.md](environment/README.md#acs-domain-verification)
+    for the exact `az network dns record-set` commands. Once Azure
     reports the domain verified, set `link_acs_email_domain = true` in the
     committed shared tfvars and re-apply — see
     [environment/README.md](environment/README.md#acs-domain-verification).
+    If the shared apply also changed `acs_sender_address`, re-apply both
+    `staging` and `prod` afterward so their Function Apps pick up the new
+    `ACS_SENDER_ADDRESS`; domain linkage remains a separate, later shared-only
+    apply run only after verification.
 
     **Note on RBAC Propagation**: On the very first apply, you might
     encounter a `403 Forbidden` error when writing secrets to Key Vault.

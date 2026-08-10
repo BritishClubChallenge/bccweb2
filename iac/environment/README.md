@@ -107,23 +107,36 @@ The stamp module's outputs re-exported at the root are exactly
 ## ACS domain verification
 
 ACS and its email domain are owned by the shared root. After applying that
-root, print the registrar records ACS needs to verify the sending domain:
+root, print the DNS records ACS needs to verify the sending domain:
 
 ```sh
 terraform -chdir=iac/shared output acs_dns_records_for_operator
 ```
 
-Add the printed records — `domain_ownership`, `spf`, `dkim`, `dkim2`, and
-`dmarc` — at your DNS registrar for the shared ACS email domain.
-Each value is Azure's record object, including its `type`, `name`, and `value`.
-The operator keys map to Azure's raw keys as follows:
-`domain_ownership` → `Domain`, `spf` → `SPF`, `dkim` → `DKIM`, `dkim2` →
-`DKIM2`, and `dmarc` → `DMARC`; there is no MX record here. Azure
-Communication Services polls for the records and flips the domain to
-"Verified" once they resolve. Then set `link_acs_email_domain = true` in
-`iac/env/shared.tfvars` and re-apply the shared root to enable outbound email.
-The shared root's output contract is documented in
+The configured ACS email domain (`email.matt-ffffff.com`) is a **delegated
+Azure DNS child zone** in resource group `rg-dns` — the registrar (GoDaddy)
+holds only its four NS delegation records, never the ACS records themselves.
+`domain_ownership`/`spf`/`dkim`/`dkim2` (and `dmarc`, an operator-authored
+policy record ACS often omits — never publish a JSON `null`) must be
+published there with `az network dns record-set`, using a name normalized
+relative to the zone (raw names come back in different shapes per key — an
+apex FQDN for some, an already-relative selector for others). The full
+worked commands, the boundary-safe normalizer, and the DMARC fallback live
+in `docs/runbooks/dns-cutover.md`'s "ACS email domain verification" section
+— follow that runbook rather than duplicating it here.
+
+Once Azure reports every check Verified, set `link_acs_email_domain = true`
+in `iac/env/shared.tfvars` and re-apply the shared root to enable outbound
+email. The shared root's output contract is documented in
 [`../shared/OUTPUTS.md`](../shared/OUTPUTS.md).
+
+**Sender-address propagation:** each environment root reads
+`acs_sender_address` from shared state independently (see "Purpose" above),
+so a shared apply that changes `acs_sender_address` does not by itself update
+either Function App's `ACS_SENDER_ADDRESS`. After the shared apply, re-apply
+**both** `staging` and `prod` to propagate the new value — domain linkage
+(`link_acs_email_domain`) is a separate, later shared-only apply run only
+after verification and needs no follow-up environment apply.
 
 ## Secret rotation
 
