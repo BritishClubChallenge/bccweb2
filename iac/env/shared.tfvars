@@ -9,7 +9,7 @@ shared_rg_name = "rg-bccweb-shared"
 
 acs_email_domain      = "email.matt-ffffff.com"
 acs_sender_address    = "no-reply@email.matt-ffffff.com"
-link_acs_email_domain = false
+link_acs_email_domain = true
 
 production_hostname          = ""
 dns_zone_name                = ""
