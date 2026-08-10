@@ -210,7 +210,9 @@ For each record from `terraform -chdir=iac/shared output acs_dns_records_for_ope
    ```bash
    DMARC_JSON=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -c '.dmarc')
    if [[ "$DMARC_JSON" != "null" ]]; then
-     NAME=$(normalize_record_name "$(jq -r '.name' <<<"$DMARC_JSON")" "$ZONE_NAME" apex)
+     # DMARC's name is a relative label (`_dmarc`), not the zone apex, so use
+     # `relative` mode — `apex` mode would reject `_dmarc` and exit early.
+     NAME=$(normalize_record_name "$(jq -r '.name' <<<"$DMARC_JSON")" "$ZONE_NAME" relative)
      VALUE=$(jq -r '.value' <<<"$DMARC_JSON")
    else
      NAME="_dmarc"; VALUE="v=DMARC1; p=none"   # author your own first-cutover policy

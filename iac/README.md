@@ -160,7 +160,7 @@ Follow these steps to provision the topology from scratch.
     `rg-dns`) — not at the registrar; GoDaddy only holds the NS delegation
     records for that subdomain — so Azure Communication Services can verify
     the email domain. See
-    [environment/README.md](environment/README.md#acs-domain-verification)
+    [dns-cutover.md](../docs/runbooks/dns-cutover.md#acs-email-domain-verification)
     for the exact `az network dns record-set` commands. Once Azure
     reports the domain verified, set `link_acs_email_domain = true` in the
     committed shared tfvars and re-apply — see
