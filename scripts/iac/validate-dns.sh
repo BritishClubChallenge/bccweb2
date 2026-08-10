@@ -21,8 +21,9 @@ set -euo pipefail
 #   ACS_EMAIL_DOMAIN=email.matt-ffffff.com \
 #     bash scripts/iac/validate-dns.sh
 #
-# Set CHECK_ACS_DNS=0 to skip the SPF/DKIM/DMARC TXT lookups when the email
-# domain has not yet been verified at the registrar.
+# Set CHECK_ACS_DNS=0 to skip the SPF/DKIM/DMARC TXT lookups when the ACS
+# email domain's records have not yet been published/verified (e.g. still
+# pending in the delegated Azure DNS zone, or a separate later change).
 #
 # Exits non-zero on the first failing check. The script prints PASS/FAIL on
 # every line so the operator can capture the output as cutover evidence.

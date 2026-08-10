@@ -86,6 +86,21 @@ Azure DNS, in resource group `rg-dns`. Every record below is published
 directly into that Azure DNS zone with `az network dns record-set` — never
 at the registrar.
 
+**Prerequisite — confirm delegation is live before publishing anything.**
+Records published into an Azure DNS zone are unreachable to the outside
+world (and ACS's own verification poller) until the registrar's NS
+delegation for that zone has propagated. Before publishing or validating any
+record below, confirm delegation against at least two independent public
+resolvers:
+```bash
+dig NS email.matt-ffffff.com @1.1.1.1 +short
+dig NS email.matt-ffffff.com @8.8.8.8 +short
+```
+Both must return the same four `ns*-03.azure-dns.*` names shown above. For
+this deployment, GoDaddy's delegation is already live and has been confirmed
+via 1.1.1.1 and 8.8.8.8 — this check remains a required first step for any
+future re-delegation or domain change, not a one-time migration task.
+
 **Record-name handling.** Live ACS `verificationRecords` evidence for this
 domain shows `name` in two shapes: `domain_ownership`/`spf` return the full
 zone-apex FQDN (`email.matt-ffffff.com`); `dkim`/`dkim2` return an
@@ -136,6 +151,11 @@ For each record from `terraform -chdir=iac/shared output acs_dns_records_for_ope
      RAW_NAME=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r ".$key.name")
      VALUE=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r ".$key.value")
      NAME=$(normalize_record_name "$RAW_NAME" "$ZONE_NAME" apex)
+     # Explicitly create the record set at TTL 300 first — `add-record` alone
+     # creates a fresh record set at the CLI default (3600) if none exists yet.
+     az network dns record-set txt create \
+       --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
+       --name "$NAME" --ttl 300
      az network dns record-set txt add-record \
        --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
        --record-set-name "$NAME" --value "$VALUE"
@@ -148,6 +168,11 @@ For each record from `terraform -chdir=iac/shared output acs_dns_records_for_ope
      RAW_NAME=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r ".$key.name")
      VALUE=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r ".$key.value")
      NAME=$(normalize_record_name "$RAW_NAME" "$ZONE_NAME" relative)
+     # Explicitly create the record set at TTL 300 first — `set-record` alone
+     # creates a fresh record set at the CLI default (3600) if none exists yet.
+     az network dns record-set cname create \
+       --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
+       --name "$NAME" --ttl 300
      az network dns record-set cname set-record \
        --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
        --record-set-name "$NAME" --cname "$VALUE"
@@ -162,6 +187,9 @@ For each record from `terraform -chdir=iac/shared output acs_dns_records_for_ope
    else
      NAME="_dmarc"; VALUE="v=DMARC1; p=none"   # author your own first-cutover policy
    fi
+   az network dns record-set txt create \
+     --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
+     --name "$NAME" --ttl 300
    az network dns record-set txt add-record \
      --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
      --record-set-name "$NAME" --value "$VALUE"
@@ -171,8 +199,14 @@ For each record from `terraform -chdir=iac/shared output acs_dns_records_for_ope
 
 Alternatively, publish each record from the Azure Portal: **Resource groups >
 `rg-dns` > `email.matt-ffffff.com` (DNS zone) > + Record set**, choosing
-record type `TXT` or `CNAME` to match the key above, and pasting the same
-`name`/`value` pair read from `acs_dns_records_for_operator`.
+record type `TXT` or `CNAME` to match the key above and setting TTL to 300.
+For **Name**, paste the *normalized* zone-relative value computed by
+`normalize_record_name` above (e.g. `@` or
+`selector1-azurecomm-prod-net._domainkey`) — never the raw FQDN Azure/ACS
+returned for `domain_ownership`/`spf`. The portal's Name field is always
+zone-relative; pasting the full FQDN there creates a wrong, nested record
+(e.g. `email.matt-ffffff.com.email.matt-ffffff.com`) instead of the intended
+apex record.
 
 **Propagating a changed sender address:** if `acs_sender_address` changes in
 `iac/env/shared.tfvars` (for example, after moving the ACS domain), the
