@@ -145,24 +145,52 @@ normalize_record_name() {
 
 For each record from `terraform -chdir=iac/shared output acs_dns_records_for_operator`:
 
-1. **`domain_ownership`** and **`spf`** (mode `apex` — TXT; `spf` value typically `v=spf1 include:azurecomm.net -all`; merge into an existing apex SPF record rather than adding a second one):
+1. **`domain_ownership`** (mode `apex` — TXT, proves domain control):
    ```bash
-   for key in domain_ownership spf; do
-     RAW_NAME=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r ".$key.name")
-     VALUE=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r ".$key.value")
-     NAME=$(normalize_record_name "$RAW_NAME" "$ZONE_NAME" apex)
-     # Explicitly create the record set at TTL 300 first — `add-record` alone
-     # creates a fresh record set at the CLI default (3600) if none exists yet.
-     az network dns record-set txt create \
-       --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
-       --name "$NAME" --ttl 300
-     az network dns record-set txt add-record \
-       --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
-       --record-set-name "$NAME" --value "$VALUE"
-   done
+   RAW_NAME=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r '.domain_ownership.name')
+   VALUE=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r '.domain_ownership.value')
+   NAME=$(normalize_record_name "$RAW_NAME" "$ZONE_NAME" apex)
+   # Explicitly create the record set at TTL 300 first — `add-record` alone
+   # creates a fresh record set at the CLI default (3600) if none exists yet.
+   az network dns record-set txt create \
+     --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
+     --name "$NAME" --ttl 300
+   az network dns record-set txt add-record \
+     --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
+     --record-set-name "$NAME" --value "$VALUE"
    ```
    Wait for the Azure portal (Communication Services > Domains) to mark the domain Verified.
-2. **`dkim`** and **`dkim2`** (mode `relative` — CNAME, under `selectorN-azurecomm-prod-net._domainkey`, pointing at Azure-managed targets):
+2. **`spf`** (mode `apex` — TXT, value typically `v=spf1 include:azurecomm.net -all`). Only one `v=spf1` TXT value is allowed per host, and it shares the same apex record set as `domain_ownership` above, so **never blindly `add-record`** — query the existing set first and fail closed if a `v=spf1` value is already there:
+   ```bash
+   SPF_VALUE=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r '.spf.value')
+   SPF_RAW_NAME=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r '.spf.name')
+   SPF_NAME=$(normalize_record_name "$SPF_RAW_NAME" "$ZONE_NAME" apex)
+
+   EXISTING_SPF=$(az network dns record-set txt show \
+       --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
+       --name "$SPF_NAME" -o json 2>/dev/null |
+     jq -r '[(.txtRecords // [])[].value | join("")]
+       | map(select(ascii_downcase | startswith("v=spf1")))
+       | .[0] // empty')
+
+   if [[ -n "$EXISTING_SPF" ]]; then
+     echo "ERROR: an existing v=spf1 TXT value is already published at '$SPF_NAME':" >&2
+     echo "  current : $EXISTING_SPF" >&2
+     echo "  required: $SPF_VALUE" >&2
+     echo "Only one v=spf1 record is allowed per host - manually merge the" >&2
+     echo "'include:azurecomm.net' clause into the existing value (or replace" >&2
+     echo "it) instead of appending a second v=spf1 record." >&2
+     exit 1
+   fi
+
+   az network dns record-set txt create \
+     --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
+     --name "$SPF_NAME" --ttl 300
+   az network dns record-set txt add-record \
+     --resource-group "$ZONE_RG" --zone-name "$ZONE_NAME" \
+     --record-set-name "$SPF_NAME" --value "$SPF_VALUE"
+   ```
+3. **`dkim`** and **`dkim2`** (mode `relative` — CNAME, under `selectorN-azurecomm-prod-net._domainkey`, pointing at Azure-managed targets):
    ```bash
    for key in dkim dkim2; do
      RAW_NAME=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -r ".$key.name")
@@ -178,7 +206,7 @@ For each record from `terraform -chdir=iac/shared output acs_dns_records_for_ope
        --record-set-name "$NAME" --cname "$VALUE"
    done
    ```
-3. **`dmarc`** — **not** an ACS verification record: ACS frequently omits it (`iac/shared/acs.tf`'s `try(local.acs_verification_records.DMARC, null)` is `null` today for this domain). It's an operator-authored deliverability policy at `_dmarc.<domain>` that you publish regardless of what ACS returns — never pass a JSON `null` to the Azure CLI:
+4. **`dmarc`** — **not** an ACS verification record: ACS frequently omits it (`iac/shared/acs.tf`'s `try(local.acs_verification_records.DMARC, null)` is `null` today for this domain). It's an operator-authored deliverability policy at `_dmarc.<domain>` that you publish regardless of what ACS returns — never pass a JSON `null` to the Azure CLI:
    ```bash
    DMARC_JSON=$(terraform -chdir=iac/shared output -json acs_dns_records_for_operator | jq -c '.dmarc')
    if [[ "$DMARC_JSON" != "null" ]]; then
@@ -195,7 +223,7 @@ For each record from `terraform -chdir=iac/shared output acs_dns_records_for_ope
      --record-set-name "$NAME" --value "$VALUE"
    ```
    Ensure `p=none` for first cutover; tighten to `p=quarantine` after one clean week of DMARC aggregate reports, and `p=reject` only after a second clean week.
-4. After Azure reports every domain check Verified, set `link_acs_email_domain = true` in `iac/env/shared.tfvars`, commit through review, and run the shared Terraform apply. Confirm the plan changes only `acs-bccweb-shared.properties.linkedDomains` before treating outbound mail as enabled.
+5. After Azure reports every domain check Verified, set `link_acs_email_domain = true` in `iac/env/shared.tfvars`, commit through review, and run the shared Terraform apply. Confirm the plan changes only `acs-bccweb-shared.properties.linkedDomains` before treating outbound mail as enabled.
 
 Alternatively, publish each record from the Azure Portal: **Resource groups >
 `rg-dns` > `email.matt-ffffff.com` (DNS zone) > + Record set**, choosing
@@ -219,7 +247,7 @@ after the shared apply completes, in either order:
 gh workflow run terraform.yml -f env=staging -f action=apply
 gh workflow run terraform.yml -f env=prod -f action=apply
 ```
-Domain linkage (`link_acs_email_domain = true`, step 4 above) still stays a
+Domain linkage (`link_acs_email_domain = true`, step 5 above) still stays a
 separate, later shared-only apply, run only after verification — it does not
 require a follow-up environment apply.
 
