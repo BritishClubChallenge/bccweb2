@@ -1,0 +1,338 @@
+# SPDX-FileCopyrightText: 2026 British Club Challenge authors
+# SPDX-License-Identifier: MPL-2.0
+name: Temporary staging storage rollout
+
+on:
+  push:
+    # TEMPORARY: remove this feature-branch workflow in Todo 10.
+    branches: [feat/staging-storage-managed-identity]
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+
+concurrency: environment-staging
+
+jobs:
+  guard:
+    name: Guard rollout transition and source SHAs
+    runs-on: ubuntu-latest
+    outputs:
+      phase: ${{ steps.guard.outputs.phase }}
+      infrastructure_sha: ${{ steps.guard.outputs.infrastructure_sha }}
+      artifact_sha: ${{ steps.guard.outputs.artifact_sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Verify transition and immutable sources
+        id: guard
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "$actual_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::Checked-out HEAD does not match github.sha"
+            exit 1
+          fi
+
+          phase="$(cat .github/staging-storage-rollout-phase.txt)"
+          if git cat-file -e HEAD~1:.github/staging-storage-rollout-phase.txt 2>/dev/null; then
+            parent_phase="$(git show HEAD~1:.github/staging-storage-rollout-phase.txt)"
+          else
+            parent_phase="absent"
+          fi
+          node scripts/ci/rollout-transition-guard.mjs \
+            "$parent_phase" "$phase" iac/env/staging.tfvars
+
+          node --test scripts/ci/__tests__/*.test.mjs scripts/__tests__/storageClients.test.mjs
+
+          if [[ "$phase" == "artifact-first" ]]; then
+            artifact_sha="$actual_sha"
+          else
+            artifact_sha=""
+            while IFS=$'\t' read -r artifact_name run_id; do
+              candidate_sha="${artifact_name#artifact-first-source-}"
+              if [[ ! "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                continue
+              fi
+              run="$(gh api "repos/${GH_REPO}/actions/runs/${run_id}")"
+              if ! jq -e --arg sha "$candidate_sha" '
+                .conclusion == "success" and
+                .event == "push" and
+                .head_branch == "feat/staging-storage-managed-identity" and
+                .head_sha == $sha and
+                .path == ".github/workflows/staging-storage-rollout.yml"
+              ' <<< "$run" >/dev/null; then
+                continue
+              fi
+              rm -rf artifact-record
+              mkdir artifact-record
+              gh run download "$run_id" --repo "$GH_REPO" \
+                --name "$artifact_name" --dir artifact-record
+              record="$(cat artifact-record/artifact-first-source-sha.txt)"
+              if [[ "$record" == "artifact_sha=${candidate_sha}" ]]; then
+                artifact_sha="$candidate_sha"
+                break
+              fi
+            done < <(gh api --paginate "repos/${GH_REPO}/actions/artifacts?per_page=100" \
+              --jq '.artifacts[] | select(.expired == false and (.name | startswith("artifact-first-source-"))) | [.name, .workflow_run.id] | @tsv')
+            if [[ -z "$artifact_sha" ]]; then
+              echo "::error::No verified successful artifact-first source record found"
+              exit 1
+            fi
+          fi
+          git merge-base --is-ancestor "$artifact_sha" HEAD
+          recorded_phase="$(git show "${artifact_sha}:.github/staging-storage-rollout-phase.txt")"
+          if [[ "$recorded_phase" != "artifact-first" ]]; then
+            echo "::error::Recorded application SHA is not the artifact-first commit"
+            exit 1
+          fi
+
+          {
+            echo "phase=$phase"
+            echo "infrastructure_sha=$actual_sha"
+            echo "artifact_sha=$artifact_sha"
+          } >> "$GITHUB_OUTPUT"
+
+  artifact-first-deploy:
+    name: Deploy backward-compatible staging artifact
+    needs: guard
+    if: needs.guard.outputs.phase == 'artifact-first'
+    uses: ./.github/workflows/deploy-app.yml
+    with:
+      environment: staging
+      swa_environment_name: staging
+      is_production: false
+    secrets: inherit
+
+  artifact-first-record:
+    name: Record artifact-first source SHA
+    needs: [guard, artifact-first-deploy]
+    if: needs.guard.outputs.phase == 'artifact-first'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write immutable source record
+        env:
+          ARTIFACT_SHA: ${{ needs.guard.outputs.artifact_sha }}
+        run: printf 'artifact_sha=%s\n' "$ARTIFACT_SHA" > artifact-first-source-sha.txt
+
+      - name: Upload immutable source record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: artifact-first-source-${{ needs.guard.outputs.artifact_sha }}
+          path: artifact-first-source-sha.txt
+          if-no-files-found: error
+
+  terraform:
+    name: Apply guarded staging Terraform plan
+    needs: guard
+    if: needs.guard.outputs.phase != 'artifact-first'
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_IN_AUTOMATION: "true"
+      TF_VAR_ops_email: ${{ secrets.TF_VAR_ops_email }}
+      TF_VAR_puretrack_api_key: ${{ secrets.TF_VAR_puretrack_api_key }}
+      TF_VAR_puretrack_email: ${{ secrets.TF_VAR_puretrack_email }}
+      TF_VAR_puretrack_password: ${{ secrets.TF_VAR_puretrack_password }}
+      TF_VAR_slack_webhook_url: ${{ secrets.TF_VAR_slack_webhook_url }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact infrastructure SHA
+        env:
+          EXPECTED_SHA: ${{ needs.guard.outputs.infrastructure_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - uses: ./.github/actions/tf-setup
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Initialize staging backend
+        run: terraform -chdir=iac/environment init -input=false -backend-config=../env/staging.backend.hcl
+
+      - name: Create saved staging plan
+        run: terraform -chdir=iac/environment plan -input=false -var-file=../env/staging.tfvars -out=tfplan
+
+      - name: Guard Terraform JSON plan
+        env:
+          PHASE: ${{ needs.guard.outputs.phase }}
+        run: |
+          set -euo pipefail
+          terraform -chdir=iac/environment show -json tfplan > iac/environment/plan.json
+          node scripts/ci/rollout-plan-guard.mjs iac/environment/plan.json "$PHASE"
+          jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) | "\(.address) \(.change.actions | join(","))"' \
+            iac/environment/plan.json > rollout-plan-summary.txt
+          {
+            printf 'infrastructure_sha=%s\n' '${{ needs.guard.outputs.infrastructure_sha }}'
+            printf 'artifact_sha=%s\n' '${{ needs.guard.outputs.artifact_sha }}'
+          } > rollout-source-shas.txt
+
+      - name: Upload guarded redacted plan summary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staging-storage-plan-${{ needs.guard.outputs.phase }}-${{ needs.guard.outputs.infrastructure_sha }}
+          path: |
+            rollout-plan-summary.txt
+            rollout-source-shas.txt
+          if-no-files-found: error
+
+      - name: Apply the guarded saved plan
+        run: terraform -chdir=iac/environment apply -input=false tfplan
+
+  deploy-current:
+    name: Deploy rollout commit application
+    needs: [guard, terraform]
+    if: needs.guard.outputs.phase != 'artifact-first'
+    uses: ./.github/workflows/deploy-app.yml
+    with:
+      environment: staging
+      swa_environment_name: staging
+      is_production: false
+    secrets: inherit
+
+  rollback-deploy:
+    name: Redeploy recorded artifact-first source
+    needs: [guard, terraform, deploy-current]
+    if: >-
+      always() &&
+      needs.terraform.result == 'success' &&
+      (needs.guard.outputs.phase == 'rollback-key-on' ||
+      needs.guard.outputs.phase == 'rollback-connection-string')
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      VITE_BLOB_BASE_URL: ${{ vars.VITE_BLOB_BASE_URL }}
+    steps:
+      - name: Check out recorded application source separately
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.guard.outputs.artifact_sha }}
+          path: prior-artifact
+          submodules: true
+
+      - name: Verify recorded application source SHA
+        env:
+          EXPECTED_SHA: ${{ needs.guard.outputs.artifact_sha }}
+        run: test "$(git -C prior-artifact rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Set up mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+
+      - name: Build recorded application source
+        working-directory: prior-artifact
+        run: |
+          set -euo pipefail
+          npm ci
+          make build
+          npm prune --omit=dev
+          mkdir -p .deploy
+          cp apps/api/host.json apps/api/package.json .deploy/
+          cp -r apps/api/dist .deploy/dist
+          rsync -a --copy-links node_modules/ .deploy/node_modules/
+          if [[ -d apps/api/node_modules ]]; then
+            rsync -a --copy-links apps/api/node_modules/ .deploy/node_modules/
+          fi
+
+      - uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy recorded API source
+        uses: Azure/functions-action@bc63708cc6539760eea18d8a7de4ce8ef5fdf593 # v1.5.6
+        with:
+          app-name: ${{ vars.AZURE_FUNCTIONAPP_NAME }}
+          package: prior-artifact/.deploy
+          sku: flexconsumption
+
+      - name: Fetch SWA deployment token
+        id: swa_token
+        run: |
+          set -euo pipefail
+          token="$(az staticwebapp secrets list \
+            --name swa-bccweb-shared \
+            --resource-group "${{ vars.SHARED_RG_NAME }}" \
+            --query properties.apiKey -o tsv)"
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy recorded web source
+        uses: Azure/static-web-apps-deploy@1a947af9992250f3bc2e68ad0754c0b0c11566c9 # v1
+        with:
+          azure_static_web_apps_api_token: ${{ steps.swa_token.outputs.token }}
+          action: upload
+          app_location: prior-artifact/dist/web
+          output_location: ""
+          skip_app_build: true
+          api_location: ""
+          deployment_environment: staging
+
+      - name: Link backend and smoke recorded deployment
+        run: |
+          set -euo pipefail
+          function_id="$(az functionapp show \
+            --name "${{ vars.AZURE_FUNCTIONAPP_NAME }}" \
+            --resource-group "${{ vars.TF_VAR_STAMP_RG_NAME }}" \
+            --query id -o tsv)"
+          current="$(az staticwebapp backends show \
+            --name swa-bccweb-shared \
+            --resource-group "${{ vars.SHARED_RG_NAME }}" \
+            --environment-name staging \
+            --query backendResourceId -o tsv 2>/dev/null || true)"
+          if [[ "$current" != "$function_id" ]]; then
+            if [[ -n "$current" ]]; then
+              az staticwebapp backends unlink \
+                --name swa-bccweb-shared \
+                --resource-group "${{ vars.SHARED_RG_NAME }}" \
+                --environment-name staging \
+                --remove-backend-auth true
+            fi
+            az staticwebapp backends link \
+              --name swa-bccweb-shared \
+              --resource-group "${{ vars.SHARED_RG_NAME }}" \
+              --environment-name staging \
+              --backend-resource-id "$function_id" \
+              --backend-region "${{ vars.AZURE_LOCATION }}"
+          fi
+          swa_host="$(az staticwebapp environment show \
+            --name swa-bccweb-shared \
+            --resource-group "${{ vars.SHARED_RG_NAME }}" \
+            --environment-name staging \
+            --query hostname -o tsv)"
+          for _ in $(seq 1 24); do
+            body="$(curl -fsS "https://${swa_host}/api/health" || true)"
+            if printf '%s' "$body" | jq -e '.status == "ok"' >/dev/null 2>&1; then
+              curl -fsS "https://${swa_host}/api/seasons" | jq -e 'type == "array"' >/dev/null
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Recorded rollback application smoke failed"
+          exit 1
+
+  operator-smoke:
+    name: Run staging operator smoke
+    needs: [guard, deploy-current, rollback-deploy]
+    if: >-
+      always() &&
+      needs.deploy-current.result == 'success' &&
+      (needs.rollback-deploy.result == 'success' || needs.rollback-deploy.result == 'skipped')
+    uses: ./.github/workflows/staging-storage-operator-smoke.yml
+    secrets: inherit

@@ -8,6 +8,7 @@ import {
   blobStorageIdentity,
   createBlobServiceClient,
   createQueueClient,
+  createQueueServiceClient,
   preflightBlobReadAccess,
   preflightQueueReadAccess,
 } from "../lib/storageClients.mjs";
@@ -64,6 +65,30 @@ test("queue factory prefers AzureWebJobsStorage over runtime account-name mode",
 
   // Then
   assert.equal(client.url, "http://127.0.0.1:10001/devstoreaccount1/igc-validation");
+});
+
+test("queue service factory supports connection-string and runtime account-name modes", () => {
+  // Given
+  const connectionEnvironment = {
+    AzureWebJobsStorage: QUEUE_CONNECTION,
+    RUNTIME_STORAGE_ACCOUNT_NAME: "ignoredruntime",
+  };
+  const accountEnvironment = { RUNTIME_STORAGE_ACCOUNT_NAME: "bccruntime" };
+
+  // When
+  const connectionClient = createQueueServiceClient({
+    environment: connectionEnvironment,
+    credential: fakeCredential,
+  });
+  const identityClient = createQueueServiceClient({
+    environment: accountEnvironment,
+    credential: fakeCredential,
+  });
+
+  // Then
+  assert.equal(connectionClient.url, "http://127.0.0.1:10001/devstoreaccount1");
+  assert.equal(identityClient.url, "https://bccruntime.queue.core.windows.net");
+  assert.equal(identityClient.credential, fakeCredential);
 });
 
 test("factories fail before I/O when their account configuration is absent", () => {

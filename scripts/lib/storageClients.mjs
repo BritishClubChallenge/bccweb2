@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 import { DefaultAzureCredential } from "@azure/identity";
 import { BlobServiceClient } from "@azure/storage-blob";
-import { QueueClient } from "@azure/storage-queue";
+import { QueueClient, QueueServiceClient } from "@azure/storage-queue";
 
 const ACCOUNT_NAME_PATTERN = /^[a-z0-9]{3,24}$/;
 const DEVELOPMENT_STORAGE_ACCOUNT = "devstoreaccount1";
@@ -162,6 +162,18 @@ export function createQueueClient(queueName, {
   if (selectedConnection) return new QueueClient(selectedConnection, queueName);
   const identity = queueStorageIdentity({ environment });
   return new QueueClient(`${identity.endpoint}/${queueName}`, credentialFor(credential));
+}
+
+export function createQueueServiceClient({
+  environment = process.env,
+  connectionString,
+  credential,
+} = {}) {
+  const selectedConnection = configuredValue(connectionString) ??
+    configuredValue(environment.AzureWebJobsStorage);
+  if (selectedConnection) return QueueServiceClient.fromConnectionString(selectedConnection);
+  const identity = queueStorageIdentity({ environment });
+  return new QueueServiceClient(identity.endpoint, credentialFor(credential));
 }
 
 export async function preflightBlobReadAccess({

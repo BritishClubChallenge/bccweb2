@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: 2026 British Club Challenge authors
+# SPDX-License-Identifier: MPL-2.0
+name: Staging storage operator smoke
+
+on:
+  workflow_call: {}
+  workflow_dispatch: {}
+  push:
+    # TEMPORARY: remove this feature-branch trigger in Todo 10.
+    branches: [feat/staging-storage-managed-identity]
+
+jobs:
+  operator-smoke:
+    name: Staging operator storage smoke
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      BLOB_STORAGE_ACCOUNT_NAME: stbccwebstagingdata
+      RUNTIME_STORAGE_ACCOUNT_NAME: stbccwebstagingrt
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install dependencies and build
+        uses: ./.github/actions/setup-node-mise
+        with:
+          build: build
+
+      - uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Scan public storage for privacy violations
+        run: node scripts/privacy-scan.mjs
+
+      - name: Reconcile orphan IGCs in dry-run mode
+        run: node scripts/admin/reconcile-orphan-igcs.mjs --dry-run --older-than-hours 24
+
+      - name: Validate migration output
+        run: npm ci --prefix scripts/migrate && make build && node scripts/migrate/validate.mjs
+
+      - name: Verify required queues without consuming messages
+        run: node scripts/verify-storage-queues.mjs
+
+      - name: Prove dedicated blob and queue write access
+        env:
+          CANARY_RUN_ID: ${{ github.run_id }}
+        run: |
+          node --input-type=module <<'EOF'
+          import {
+            createBlobServiceClient,
+            createQueueServiceClient,
+          } from "./scripts/lib/storageClients.mjs";
+
+          const runId = process.env.CANARY_RUN_ID;
+          if (!runId || !/^\d+$/u.test(runId)) throw new Error("Invalid GitHub run ID");
+          const timestamp = new Date().toISOString();
+          const content = JSON.stringify({ runId, timestamp });
+
+          const blobService = createBlobServiceClient();
+          const blob = blobService
+            .getContainerClient("data-private")
+            .getBlockBlobClient(`mi-canary/${runId}.json`);
+          try {
+            await blob.upload(content, Buffer.byteLength(content), {
+              blobHTTPHeaders: { blobContentType: "application/json" },
+            });
+            const downloaded = await blob.downloadToBuffer();
+            if (downloaded.toString("utf8") !== content) throw new Error("Blob canary content mismatch");
+          } finally {
+            await blob.deleteIfExists();
+          }
+
+          const queueService = createQueueServiceClient();
+          const queueName = `mi-canary-${runId}`;
+          const queue = queueService.getQueueClient(queueName);
+          try {
+            await queue.create();
+            await queue.sendMessage(content);
+            const received = await queue.receiveMessages({ numberOfMessages: 1 });
+            const message = received.receivedMessageItems[0];
+            if (!message || message.messageText !== content) throw new Error("Queue canary content mismatch");
+            await queue.deleteMessage(message.messageId, message.popReceipt);
+          } finally {
+            await queue.deleteIfExists();
+          }
+
+          console.log(`[PASS] operator storage canaries completed for run ${runId}`);
+          EOF
