@@ -20,6 +20,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { join } from "node:path";
 import { readDiscardedCounts } from "./discarded-counts.mjs";
 import { readNormalizationCounts } from "./normalization-counts.mjs";
+import { blobServiceUrl } from "./blobClient.mjs";
 
 const STATE_DIR = ".migration-state";
 const MAP_PATH = join(STATE_DIR, "id-map.json");
@@ -206,7 +207,10 @@ if (prodSnapshotPath) {
 
   source = {
     sqlConn: maskConnectionString(process.env.PROD_SQL_CONN ?? process.env.SQL_CONNECTION_STRING),
-    blobConn: maskConnectionString(process.env.PROD_BLOB_CONN ?? process.env.BLOB_CONNECTION_STRING),
+    blobConn: maskConnectionString(process.env.PROD_BLOB_CONN ?? process.env.BLOB_CONNECTION_STRING) ??
+      (process.env.BLOB_STORAGE_ACCOUNT_NAME
+        ? blobServiceUrl(process.env.BLOB_STORAGE_ACCOUNT_NAME)
+        : null),
     prodSnapshot: prodSnapshotPath,
     dryRunStdout: existsSync(STDOUT_PATH) ? STDOUT_PATH : null,
   };

@@ -14,6 +14,9 @@
  *   BLOB_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=...;..."  \
  *   node scripts/migrate/validate.mjs
  *
+ * Or use the invoking operator/OIDC identity:
+ *   BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata" node scripts/migrate/validate.mjs
+ *
  * Against Azurite:
  *   BLOB_CONNECTION_STRING="UseDevelopmentStorage=true" \
  *   node scripts/migrate/validate.mjs
@@ -24,8 +27,8 @@
 
 import { pathToFileURL } from "node:url";
 
-import { BlobServiceClient } from "@azure/storage-blob";
 import { findPiiInObject, PII_FIELDS } from "../lib/pii.mjs";
+import { createBlobServiceClient } from "./blobClient.mjs";
 import { legacyScoreManifestPath, readLegacyScoreManifest } from "./legacy-score-manifest.mjs";
 
 const PUBLIC_CONTAINER = process.env.BLOB_CONTAINER_NAME ?? process.env.BLOB_CONTAINER ?? "data";
@@ -549,15 +552,9 @@ async function crossCheckLegacyScores(privateClient, roundsSummary) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  const blobConnectionString = process.env.BLOB_CONNECTION_STRING;
-  if (!blobConnectionString) {
-    console.error("Missing BLOB_CONNECTION_STRING env var");
-    process.exit(1);
-  }
-
+  const blobService = createBlobServiceClient();
   const schemas = await loadBuiltSchemas();
   const maps = schemaMaps(schemas);
-  const blobService = BlobServiceClient.fromConnectionString(blobConnectionString);
   const publicClient = blobService.getContainerClient(PUBLIC_CONTAINER);
   const privateClient = blobService.getContainerClient(PRIVATE_CONTAINER);
 

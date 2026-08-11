@@ -17,18 +17,12 @@
  * Idempotent: running twice always produces "0 fixes needed" on the second run.
  */
 
-import { BlobServiceClient } from "@azure/storage-blob";
+import { createBlobServiceClient } from "./blobClient.mjs";
 
 const APPLY = process.argv.includes("--apply");
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const connectionString =
-  process.env["BLOB_CONNECTION_STRING"] ??
-  "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;" +
-  "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;" +
-  "BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;";
-
-const blobService = BlobServiceClient.fromConnectionString(connectionString);
+const blobService = createBlobServiceClient();
 const privateContainer = blobService.getContainerClient("data-private");
 
 async function readJson(path) {

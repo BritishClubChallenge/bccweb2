@@ -9,7 +9,8 @@
     "validate": "node validate.mjs"
   },
   "dependencies": {
-    "mssql": "12.6.0",
-    "@azure/storage-blob": "12.33.0"
+    "@azure/identity": "4.13.1",
+    "@azure/storage-blob": "12.33.0",
+    "mssql": "12.6.0"
   }
 }
