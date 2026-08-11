@@ -93,8 +93,9 @@ cleans an owned checkpoint; verifier/queue failure preserves all state and forbi
 cleanup. See `docs/runbooks/load-testing.md`.
 
 Host-side local verification uses the queue-capable Azurite connection on `127.0.0.1:10001`
-when `AzureWebJobsStorage` is absent. Remote targets still require that setting explicitly;
-the verifier never falls back to blob-only `BLOB_CONNECTION_STRING`.
+when `AzureWebJobsStorage` is absent. Remote targets require either that connection string
+or `RUNTIME_STORAGE_ACCOUNT_NAME`; the verifier never falls back to blob-only
+`BLOB_CONNECTION_STRING`.
 
 Local `make seed` bootstraps `admin@bcc.local` and writes its generated credential only
 to the ignored root `.dev-credentials` at mode 0600; the value is never logged.

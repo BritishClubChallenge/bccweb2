@@ -6,7 +6,7 @@
  *
  * Usage:
  *   GDPR_ANONYMIZE_CONFIRM=YES \
- *   BLOB_CONNECTION_STRING="..." \
+ *   BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata" \
  *   node scripts/admin/anonymize-pilot.mjs --pilotId <uuid> --confirm
  *
  * Guards (both required to prevent accidental execution):
@@ -30,10 +30,13 @@
  *   Contains: blobs touched, field names (NOT values) changed, timestamp, operator.
  */
 
-import { BlobServiceClient } from "@azure/storage-blob";
 import { writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import {
+  createBlobServiceClient,
+  preflightBlobReadAccess,
+} from "../lib/storageClients.mjs";
 
 // ─── Guards ───────────────────────────────────────────────────────────────────
 
@@ -76,13 +79,13 @@ const AZURITE_DEV_CS =
   "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;" +
   "BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;";
 
-const CONNECTION_STRING =
-  process.env["BLOB_CONNECTION_STRING"] ?? AZURITE_DEV_CS;
+const CONNECTION_STRING = process.env["BLOB_CONNECTION_STRING"] ??
+  (process.env["BLOB_STORAGE_ACCOUNT_NAME"] ? undefined : AZURITE_DEV_CS);
 
 const PUBLIC_CONTAINER = process.env["BLOB_CONTAINER_NAME"] ?? "data";
 const PRIVATE_CONTAINER = process.env["BLOB_PRIVATE_CONTAINER_NAME"] ?? "data-private";
 
-const blobService = BlobServiceClient.fromConnectionString(CONNECTION_STRING);
+const blobService = createBlobServiceClient({ connectionString: CONNECTION_STRING });
 const pub = blobService.getContainerClient(PUBLIC_CONTAINER);
 const priv = blobService.getContainerClient(PRIVATE_CONTAINER);
 
@@ -198,6 +201,11 @@ async function main() {
 
   console.log(`[GDPR] Starting anonymization for pilotId=${pilotId}`);
   console.log(`[GDPR] Timestamp: ${runAt}`);
+
+  await Promise.all([
+    preflightBlobReadAccess({ container: pub, connectionString: CONNECTION_STRING }),
+    preflightBlobReadAccess({ container: priv, connectionString: CONNECTION_STRING }),
+  ]);
 
   // ── Step 1: Read pilot private blob ─────────────────────────────────────────
 

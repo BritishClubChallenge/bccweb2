@@ -65,8 +65,9 @@ it must not be used to restore an erased pilot without a new data-controller dec
 
 ```sh
 # 1. Confirm you have written authorisation and the pilotId.
-# 2. Export the production connection string (never commit this to the repo).
-export BLOB_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=...;..."
+# 2. Select the remote data account. DefaultAzureCredential uses your current
+#    az login/OIDC identity; do not use the Function App managed identity.
+export BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata"
 
 # 3. Set the confirmation guard.
 export GDPR_ANONYMIZE_CONFIRM=YES

@@ -69,8 +69,8 @@ k6 retry/sleep or a production bypass.
 
 For a loopback target, the host verifier uses the repository's queue-capable Azurite
 default (`127.0.0.1:10001`) when `AzureWebJobsStorage` is not exported in the shell.
-Remote targets must provide `AzureWebJobsStorage`; `BLOB_CONNECTION_STRING` remains
-blob-only and is never used for queue verification.
+Remote targets must provide `AzureWebJobsStorage` or `RUNTIME_STORAGE_ACCOUNT_NAME`;
+`BLOB_CONNECTION_STRING` remains blob-only and is never used for queue verification.
 
 Each environment now provisions TWO storage accounts (see
 `docs/architecture/storage-and-queues.md`): Account A (`stbccweb<env>rt`, e.g.

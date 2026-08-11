@@ -32,7 +32,8 @@ the private source of truth.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BLOB_CONNECTION_STRING` | Azurite dev | Set to production storage connection string |
+| `BLOB_CONNECTION_STRING` | Azurite dev | Local/legacy connection string; takes precedence |
+| `BLOB_STORAGE_ACCOUNT_NAME` | — | Remote data account; uses the invoking Entra identity |
 | `BLOB_CONTAINER_NAME` | `data` | Public container |
 | `BLOB_PRIVATE_CONTAINER_NAME` | `data-private` | Private container (source of truth) |
 

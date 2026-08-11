@@ -208,7 +208,7 @@ test("remote redispatch fails closed without AzureWebJobsStorage", () => {
     // When / Then
     assert.throws(
       () => queueConnectionString(),
-      /AzureWebJobsStorage is required when redispatching to a remote target/
+      /AzureWebJobsStorage or RUNTIME_STORAGE_ACCOUNT_NAME is required when redispatching to a remote target/
     );
   } finally {
     if (previousQueue === undefined) delete process.env.AzureWebJobsStorage;

@@ -29,6 +29,15 @@ unreachable the script throws and exits non-zero, exactly like `round-brief-pdf`
 containers are created earlier in the same run, so a queue-service outage still surfaces
 as a hard failure rather than a silent partial success.
 
+## Storage authentication for root scripts
+
+Root-package operator scripts use `lib/storageClients.mjs`. Local/Azurite execution uses
+`BLOB_CONNECTION_STRING` and `AzureWebJobsStorage`; remote keyless execution requires
+`BLOB_STORAGE_ACCOUNT_NAME` for data blobs and `RUNTIME_STORAGE_ACCOUNT_NAME` for queues,
+authenticated as the invoking operator/OIDC identity through `DefaultAzureCredential`.
+Do not bind these scripts to the Function App managed identity. `init-storage.mjs` remains
+an Azurite-only Shared Key REST bootstrap and deliberately does not use the adapter.
+
 ## `privacy-scan.mjs` — CI success gate
 
 Fails CI if PII leaks into public blobs, the SPA bundle, or telemetry/log fixtures. Its

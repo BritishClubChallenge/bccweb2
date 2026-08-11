@@ -12,6 +12,7 @@ import { ConfigSchema } from "@bccweb/schemas";
 import {
   getPrivateContainer,
   getPublicContainer,
+  preflightBlobContainerRead,
   precomputeBcryptHash,
   readJson,
   writeJson,
@@ -155,6 +156,10 @@ async function main() {
   validateLoadTestManifest(manifest, SEASON_YEAR);
   const publicContainer = getPublicContainer();
   const privateContainer = getPrivateContainer();
+  await Promise.all([
+    preflightBlobContainerRead(publicContainer),
+    preflightBlobContainerRead(privateContainer),
+  ]);
   await Promise.all([
     publicContainer.createIfNotExists({ access: "blob" }),
     privateContainer.createIfNotExists(),

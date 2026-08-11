@@ -5,11 +5,14 @@
  * Dry-run is the default; --redispatch reuses the committed validation attempt ID.
  */
 
-import { QueueClient } from "@azure/storage-queue";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { getPrivateContainer, readJson } from "../lib/blobSeed.mjs";
+import {
+  createQueueClient,
+  preflightQueueReadAccess,
+} from "../lib/storageClients.mjs";
 
 const QUEUE_NAME = "igc-validation";
 const ROUND_PREFIX = "rounds/";
@@ -69,6 +72,8 @@ export function parseArgs(argv) {
 export function queueConnectionString() {
   const configured = process.env.AzureWebJobsStorage;
   if (typeof configured === "string" && configured.length > 0) return configured;
+  if (typeof process.env.RUNTIME_STORAGE_ACCOUNT_NAME === "string" &&
+    process.env.RUNTIME_STORAGE_ACCOUNT_NAME.length > 0) return undefined;
 
   const blobConnection = process.env.BLOB_CONNECTION_STRING;
   if (
@@ -78,7 +83,9 @@ export function queueConnectionString() {
   ) {
     return LOCAL_AZURITE_QUEUE_CONNECTION;
   }
-  throw new Error("AzureWebJobsStorage is required when redispatching to a remote target");
+  throw new Error(
+    "AzureWebJobsStorage or RUNTIME_STORAGE_ACCOUNT_NAME is required when redispatching to a remote target",
+  );
 }
 
 function roundFileName(blobName) {
@@ -198,7 +205,9 @@ export async function main({
   argv = process.argv.slice(2),
   container,
   now = Date.now(),
-  queueFactory = (connectionString, queueName) => new QueueClient(connectionString, queueName),
+  queueFactory = (connectionString, queueName) => (
+    createQueueClient(queueName, { connectionString })
+  ),
   log = console.log,
 } = {}) {
   const options = parseArgs(argv);
@@ -215,7 +224,9 @@ export async function main({
   let queue;
 
   if (options.mode === "redispatch" && candidates.length > 0) {
-    queue = queueFactory(queueConnectionString(), QUEUE_NAME);
+    const connectionString = queueConnectionString();
+    queue = queueFactory(connectionString, QUEUE_NAME);
+    await preflightQueueReadAccess({ queue, connectionString });
     await queue.createIfNotExists();
   }
 
