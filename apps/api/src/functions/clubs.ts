@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { BlobServiceClient, ContainerClient } from "@azure/storage-blob";
 import { randomUUID } from "crypto";
 import type { Club, ClubSummary } from "@bccweb/types";
 import { ClubSchema, ClubSummarySchema, ClubTeamSummarySchema, SeasonClubSchema, SeasonSummarySchema, SiteSummarySchema } from "@bccweb/schemas";
@@ -15,6 +14,7 @@ import {
 } from "../lib/auth.js";
 import { HttpError, withErrorHandler } from "../lib/http.js";
 import { mutationRateLimit } from "../lib/rateLimit.js";
+import { getBlobServiceClient } from "../lib/storageClients.js";
 
 const ClubsIndexSchema = z.array(ClubSummarySchema);
 const ClubTeamsIndexSchema = z.array(ClubTeamSummarySchema);
@@ -33,20 +33,14 @@ const SeasonClubIndexSchema = z.array(z
   })
   .strip());
 
-let privateContainer: ContainerClient | null = null;
-
 interface ClubPatch {
   readonly name?: string;
   readonly sites?: string[];
 }
 
-function getPrivateContainer(): ContainerClient {
-  if (privateContainer) return privateContainer;
-  const connectionString = process.env["BLOB_CONNECTION_STRING"];
-  if (!connectionString) throw new Error("BLOB_CONNECTION_STRING environment variable is not set");
+function getPrivateContainer() {
   const containerName = process.env["BLOB_PRIVATE_CONTAINER_NAME"] ?? "data-private";
-  privateContainer = BlobServiceClient.fromConnectionString(connectionString).getContainerClient(containerName);
-  return privateContainer;
+  return getBlobServiceClient().getContainerClient(containerName);
 }
 
 // ─── GET /api/clubs ───────────────────────────────────────────────────────────

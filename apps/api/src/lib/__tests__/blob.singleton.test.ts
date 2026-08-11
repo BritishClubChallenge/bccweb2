@@ -82,6 +82,23 @@ describe("resetBlobSingletons", () => {
     );
   });
 
+  test("resets the shared storage-client seam", async () => {
+    // Given
+    const resetStorageClientSingletons = vi.fn();
+    vi.doMock("../storageClients.js", () => ({
+      getBlobServiceClient: vi.fn(),
+      resetStorageClientSingletons,
+    }));
+    const { resetBlobSingletons } = await import("../blob.js");
+
+    // When
+    resetBlobSingletons();
+
+    // Then
+    expect(resetStorageClientSingletons).toHaveBeenCalledOnce();
+    vi.doUnmock("../storageClients.js");
+  });
+
   // ─── Fail-loud container-name contract ──────────────────────────────────────
   // With a valid connection string but NO container name, resolving a client
   // must throw an error that names the missing env var instead of silently

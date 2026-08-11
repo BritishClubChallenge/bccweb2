@@ -1,6 +1,5 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
-import { QueueClient } from "@azure/storage-queue";
 import { IgcValidationJobSchema } from "@bccweb/schemas";
 import type { FlightValidation, IgcValidationJob } from "@bccweb/types";
 import * as z from "zod/v4";
@@ -11,7 +10,7 @@ import {
   withPrivateLeaseRenewing,
   writePrivateBlob,
 } from "./blob.js";
-import { queueConnectionString } from "./queue.js";
+import { getRuntimeQueueClient } from "./storageClients.js";
 
 export const IGC_VALIDATION_QUEUE_NAME = "igc-validation";
 
@@ -59,10 +58,7 @@ export async function enqueueIgcValidation(
 ): Promise<void> {
   const parsed = IgcValidationJobSchema.parse(job);
   const message = Buffer.from(JSON.stringify(parsed)).toString("base64");
-  const client = new QueueClient(
-    queueConnectionString(),
-    IGC_VALIDATION_QUEUE_NAME,
-  );
+  const client = getRuntimeQueueClient(IGC_VALIDATION_QUEUE_NAME);
   await client.createIfNotExists();
   const visibilityTimeout = opts?.visibilityTimeoutSeconds;
   if (visibilityTimeout === undefined) {

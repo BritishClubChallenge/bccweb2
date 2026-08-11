@@ -17,7 +17,7 @@ import {
   InvocationContext,
 } from "@azure/functions";
 import { createHash, randomUUID } from "node:crypto";
-import { BlobServiceClient, type ContainerClient } from "@azure/storage-blob";
+import type { ContainerClient } from "@azure/storage-blob";
 import type { AdminUserView, Config, Pilot, PilotEmailIndex, PilotSummary, Round, User } from "@bccweb/types";
 import { AuthCredentialSchema, ConfigPatchSchema, ConfigSchema, PilotSchema, PilotSummarySchema, RoundSchema, UserSchema } from "@bccweb/schemas";
 import * as z from "zod/v4";
@@ -42,6 +42,7 @@ import { assertNotLastAdmin, withAccountMutationLock } from "../lib/accountMutat
 import { HttpError, withErrorHandler } from "../lib/http.js";
 import { mutationRateLimit } from "../lib/rateLimit.js";
 import { recomputeSeason, updateRoundsIndex } from "../lib/recompute.js";
+import { getBlobServiceClient } from "../lib/storageClients.js";
 
 // ─── Auth helper ──────────────────────────────────────────────────────────────
 
@@ -83,15 +84,11 @@ const DeletedUserTombstoneSchema = z.strictObject({
 type DeletedUserTombstone = z.infer<typeof DeletedUserTombstoneSchema>;
 
 function getPrivateContainer(): ContainerClient {
-  const connectionString = process.env["BLOB_CONNECTION_STRING"];
   const containerName = process.env["BLOB_PRIVATE_CONTAINER_NAME"];
-  if (!connectionString) {
-    throw new Error("BLOB_CONNECTION_STRING environment variable is not set");
-  }
   if (!containerName) {
     throw new Error("BLOB_PRIVATE_CONTAINER_NAME environment variable is not set");
   }
-  return BlobServiceClient.fromConnectionString(connectionString).getContainerClient(containerName);
+  return getBlobServiceClient().getContainerClient(containerName);
 }
 
 /**

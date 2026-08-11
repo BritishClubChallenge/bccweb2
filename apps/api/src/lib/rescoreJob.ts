@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
-import { QueueClient } from "@azure/storage-queue";
 import * as z from "zod/v4";
 import type { RescoreJob, RescoreJobMessage } from "@bccweb/types";
 
 import { getPrivateBlobClient, writePrivateBlob } from "./blob.js";
+import { getRuntimeQueueClient } from "./storageClients.js";
 
 export const RESCORE_QUEUE_NAME = "rescore-jobs";
 
@@ -99,23 +99,9 @@ export async function enqueueRescore(msg: RescoreJobMessage): Promise<void> {
   // Parse FIRST (strict schema) so a bad/extra field is rejected before anything
   // is serialised — no PII can leak into a queue message.
   const parsed = RescoreJobMessageSchema.parse(msg);
-  const client = new QueueClient(queueConnectionString(), RESCORE_QUEUE_NAME);
+  const client = getRuntimeQueueClient(RESCORE_QUEUE_NAME);
   await client.createIfNotExists();
   await client.sendMessage(Buffer.from(JSON.stringify(parsed)).toString("base64"));
-}
-
-function queueConnectionString(): string {
-  // AzureWebJobsStorage is the ONLY setting carrying a QueueEndpoint in
-  // local/docker, and it equals the rescoreWorker trigger's `connection`, so
-  // producer and trigger can never diverge. Do NOT fall back to
-  // BLOB_CONNECTION_STRING (blob-only) — that would silently break queueing.
-  const connectionString = process.env["AzureWebJobsStorage"];
-  if (!connectionString) {
-    throw new Error(
-      "AzureWebJobsStorage environment variable is not set (required to enqueue rescore jobs)",
-    );
-  }
-  return connectionString;
 }
 
 function statusCodeOf(err: unknown): number | undefined {
