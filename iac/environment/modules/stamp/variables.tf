@@ -35,6 +35,24 @@ variable "allowed_origins" {
   default     = []
 }
 
+variable "use_identity_storage" {
+  description = "Whether storage access uses the Function App user-assigned identity instead of account keys."
+  type        = bool
+  default     = false
+}
+
+variable "allow_shared_key_access" {
+  description = "Whether both application storage accounts permit Shared Key authorization."
+  type        = bool
+  default     = true
+}
+
+variable "operator_principal_id" {
+  description = "Optional staging deployment operator service-principal object ID for storage data-plane access."
+  type        = string
+  default     = ""
+}
+
 variable "storage_sku" {
   description = "Replication SKU for the application data storage account."
   type        = string

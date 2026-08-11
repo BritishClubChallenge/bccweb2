@@ -1,10 +1,19 @@
 # SPDX-FileCopyrightText: 2026 British Club Challenge authors
 # SPDX-License-Identifier: MPL-2.0
 locals {
-  function_app_settings = [
+  storage_app_settings = var.use_identity_storage ? [
+    { name = "AzureWebJobsStorage__accountName", value = local.storage_account_name_runtime },
+    { name = "AzureWebJobsStorage__credential", value = "managedidentity" },
+    { name = "AzureWebJobsStorage__clientId", value = azapi_resource.fn_umi.output.properties.clientId },
+    { name = "BLOB_STORAGE_ACCOUNT_NAME", value = local.storage_account_name_data },
+    { name = "STORAGE_UMI_CLIENT_ID", value = azapi_resource.fn_umi.output.properties.clientId },
+    ] : [
     { name = "AzureWebJobsStorage", value = local.storage_runtime_connection_string },
-    { name = "FUNCTIONS_NODE_BLOCK_ON_ENTRY_POINT_ERROR", value = "true" },
     { name = "BLOB_CONNECTION_STRING", value = local.storage_data_connection_string },
+  ]
+
+  function_app_settings = concat(local.storage_app_settings, [
+    { name = "FUNCTIONS_NODE_BLOCK_ON_ENTRY_POINT_ERROR", value = "true" },
     { name = "BLOB_CONTAINER_NAME", value = "data" },
     { name = "BLOB_PRIVATE_CONTAINER_NAME", value = "data-private" },
     { name = "BLOB_SCHEMA_MODE", value = var.blob_schema_mode },
@@ -18,7 +27,7 @@ locals {
     { name = "FAI_VALI_ENABLED", value = "true" },
     { name = "FAI_VALI_BASE_URL", value = "https://vali.fai-civl.org" },
     { name = "FAI_VALI_TIMEOUT_MS", value = "20000" },
-  ]
+  ])
 }
 
 resource "azapi_resource" "fn_umi" {
@@ -81,10 +90,14 @@ resource "azapi_resource" "function_app" {
           storage = {
             type  = "blobContainer"
             value = "${trimsuffix(azapi_resource.storage_runtime.output.properties.primaryEndpoints.blob, "/")}/deploymentpackage"
-            authentication = {
-              type                               = "StorageAccountConnectionString"
-              storageAccountConnectionStringName = "AzureWebJobsStorage"
-            }
+            authentication = merge(
+              { type = var.use_identity_storage ? "UserAssignedIdentity" : "StorageAccountConnectionString" },
+              var.use_identity_storage ? {
+                userAssignedIdentityResourceId = azapi_resource.fn_umi.id
+                } : {
+                storageAccountConnectionStringName = "AzureWebJobsStorage"
+              }
+            )
           }
         }
         runtime = {
@@ -105,7 +118,16 @@ resource "azapi_resource" "function_app" {
 
   response_export_values = ["id", "name", "properties.defaultHostName"]
 
-  depends_on = [azapi_resource.storage_container_deploy]
+  depends_on = [
+    azapi_resource.storage_container_deploy,
+    azapi_resource.fn_runtime_blob_owner_role,
+    azapi_resource.fn_runtime_queue_contributor_role,
+    azapi_resource.fn_runtime_table_contributor_role,
+    azapi_resource.fn_data_blob_contributor_role,
+    azapi_resource.operator_runtime_queue_contributor_role,
+    azapi_resource.operator_deployment_blob_contributor_role,
+    azapi_resource.operator_data_blob_contributor_role,
+  ]
 
   lifecycle {
     ignore_changes = [body.properties.siteConfig.cors]
