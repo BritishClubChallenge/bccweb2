@@ -31,18 +31,37 @@ Atomic read-modify-write on either container uses 30-second blob leases —
 ### Two storage accounts per environment
 
 `data`/`data-private` and the runtime/queue plane live in **two separate Azure Storage
-accounts per environment** — an infra-only split with no app-code change (the API still
-uses one shared `BlobServiceClient` per connection string, so the two containers still
-can't themselves be split across accounts):
+accounts per environment** behind a dual-mode storage adapter:
 
-- **Account A** `stbccweb<env>rt` — backs `AzureWebJobsStorage`: the Functions host's
+- **Account A** `stbccweb<env>rt` — the Functions host's
   runtime storage, all ten queues below, and the Flex Consumption
   `deploymentpackage` blob container the Function App deploys from. Always
   `Standard_LRS`, public blob access disabled, no management lock.
-- **Account B** `stbccweb<env>data` — backs `BLOB_CONNECTION_STRING`: the `data`
+- **Account B** `stbccweb<env>data` — the `data`
   (public) and `data-private` containers described above. Environment-derived
   LRS/GRS replication, public blob access enabled (for `data`), and a prod-only
   `CanNotDelete` lock.
+
+### Identity-based access (staging)
+
+The managed-identity contract is enabled/applied only for staging; production has not
+been deployed with it and is not keyless. The runtime and data accounts remain distinct:
+Functions host state, queues, and `deploymentpackage` use the runtime account, while
+public/private application blobs use the data account.
+
+The Function App's UMI is the workload identity for host storage, Flex deployment,
+runtime queues/tables, and data blobs (staging client ID
+`cbbdfdb9-5743-46b9-8ad1-03b94303c0ef`). The host uses
+`AzureWebJobsStorage__accountName`, `AzureWebJobsStorage__credential=managedidentity`,
+and `AzureWebJobsStorage__clientId`; the API adapter uses
+`RUNTIME_STORAGE_ACCOUNT_NAME`, `BLOB_STORAGE_ACCOUNT_NAME`, and
+`STORAGE_UMI_CLIENT_ID`. A separate staging GitHub OIDC/Terraform UMI (principal ID
+`4eabcaaf-5340-41b7-9ed2-7b47ebeaa7cd`) authenticates
+deployment and remote operator scripts and receives only its queue, data-blob, and
+`deploymentpackage` grants; it must not be confused with the Function UMI.
+
+Local development, Docker, tests, and Azurite are the deliberate exception: they retain
+`AzureWebJobsStorage` and `BLOB_CONNECTION_STRING` and do not require Azure identities.
 
 ## Schema layer
 

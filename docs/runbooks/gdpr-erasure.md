@@ -67,6 +67,7 @@ it must not be used to restore an erased pilot without a new data-controller dec
 # 1. Confirm you have written authorisation and the pilotId.
 # 2. Select the remote data account. DefaultAzureCredential uses your current
 #    az login/OIDC identity; do not use the Function App managed identity.
+az login
 export BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata"
 
 # 3. Set the confirmation guard.
@@ -75,6 +76,12 @@ export GDPR_ANONYMIZE_CONFIRM=YES
 # 4. Run.
 node scripts/admin/anonymize-pilot.mjs --pilotId <uuid> --confirm
 ```
+
+Persistent operator storage roles belong to the staging OIDC UMI. A local human running
+this procedure needs a separately approved data-plane grant. For authorised local
+Azurite rehearsal, omit the account name and use
+`BLOB_CONNECTION_STRING="UseDevelopmentStorage=true"`; never substitute a remote account
+key.
 
 The script will:
 - Refuse to run without both `--confirm` and `GDPR_ANONYMIZE_CONFIRM=YES`.

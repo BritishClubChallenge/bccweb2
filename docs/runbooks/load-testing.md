@@ -14,7 +14,8 @@ before destructive cleanup. Never target production or a shared queue.
 3. Export `LOADTEST_DEDICATED_STACK=1`. Queue counts are approximate and global;
    cleanup permission is meaningful only when this suite owns the stack.
 4. For Azure, set `BCC_API_BASE_URL` and `ADMIN_PASSWORD`, disable PureTrack/email,
-   and use an approved authentication design. Azure login remains limited to 10/min
+   run `az login`, and export `BLOB_STORAGE_ACCOUNT_NAME=stbccwebstagingdata` plus
+   `RUNTIME_STORAGE_ACCOUNT_NAME=stbccwebstagingrt`. Azure login remains limited to 10/min
    per trusted `client-ip`; local synthetic XFF partitioning does not bypass it.
    Remote hostnames must contain `loadtest` or `staging`; production-looking names
    fail before the orchestrator creates state or starts prepare.
@@ -71,12 +72,17 @@ For a loopback target, the host verifier uses the repository's queue-capable Azu
 default (`127.0.0.1:10001`) when `AzureWebJobsStorage` is not exported in the shell.
 Remote targets must provide `AzureWebJobsStorage` or `RUNTIME_STORAGE_ACCOUNT_NAME`;
 `BLOB_CONNECTION_STRING` remains blob-only and is never used for queue verification.
+For remote staging, use account names with the invoking Entra identity, not remote storage
+keys or the Function UMI. Persistent operator blob/queue roles belong to the staging OIDC
+UMI; a local human needs a separately approved grant. Local Azurite remains explicit:
+`BLOB_CONNECTION_STRING="UseDevelopmentStorage=true"` and
+`AzureWebJobsStorage="UseDevelopmentStorage=true"`.
 
 Each environment now provisions TWO storage accounts (see
 `docs/architecture/storage-and-queues.md`): Account A (`stbccweb<env>rt`, e.g.
 `stbccwebstagingrt`) is the `AzureWebJobsStorage` target — it holds all ten queues plus
 the Flex Consumption deployment package — while Account B (`stbccweb<env>data`, e.g.
-`stbccwebstagingdata`) is the `BLOB_CONNECTION_STRING` target holding `data`/`data-private`.
+`stbccwebstagingdata`) is the application blob target holding `data`/`data-private`.
 The queue gate above (main/poison quiescence) always inspects Account A; register/sign/
 artifact HTTP traffic reads and writes Account B through the API. When targeting a real
 Azure stack, resolve each account name from its own Terraform output — do not assume a
@@ -85,6 +91,14 @@ single combined account:
 ```bash
 terraform -chdir=iac/environment output -raw storage_account_name_runtime  # Account A
 terraform -chdir=iac/environment output -raw storage_account_name_data     # Account B
+```
+
+For the staging identity path the equivalent operator setup is:
+
+```bash
+az login
+export BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata"
+export RUNTIME_STORAGE_ACCOUNT_NAME="stbccwebstagingrt"
 ```
 
 These gates are user-approved release criteria. Do not downgrade them to advisory

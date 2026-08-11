@@ -9,9 +9,11 @@ don't re-read the source.
 - `enqueueBriefPdf`/`enqueueSignToFlyReflect`/`enqueuePureTrackGroupJob` and
   `igcValidationJob.ts`'s `enqueueIgcValidation` obtain named runtime-account clients
   through `storageClients.ts`. Local/Azurite mode uses `AzureWebJobsStorage` (the only
-  setting with a `QueueEndpoint` locally); identity mode uses the explicit runtime account
-  settings. **Never** switch a producer to `BLOB_CONNECTION_STRING` — that's blob-only and
-  would silently break queueing.
+  setting with a `QueueEndpoint` locally); identity mode uses
+  `RUNTIME_STORAGE_ACCOUNT_NAME` plus `STORAGE_UMI_CLIENT_ID`. The Functions host's queue
+  triggers separately resolve `AzureWebJobsStorage__accountName`, `__credential`, and
+  `__clientId`. **Never** switch a producer to `BLOB_CONNECTION_STRING` — that's blob-only
+  and would silently break queueing.
 - `BriefPdfJobSchema`, `SignToFlyReflectJobSchema`, `PureTrackGroupJobSchema` are
   `z.object({...}).strict()` — any extra key is rejected at serialisation time so PII can
   never enter a queue message. `RescoreJobMessageSchema` (same pattern) lives in
@@ -27,7 +29,9 @@ don't re-read the source.
 
 - `storageClients.ts` is the only application SDK-construction/authentication seam:
   `BLOB_CONNECTION_STRING` preserves local/Azurite behavior; otherwise the data-account
-  settings select managed identity. Direct container helpers call
+  pair `BLOB_STORAGE_ACCOUNT_NAME` + `STORAGE_UMI_CLIENT_ID` selects the Function UMI.
+  This workload identity is distinct from the staging OIDC operator identity used by
+  scripts and deployment automation. Direct container helpers call
   `getBlobServiceClient().getContainerClient(name)` so public/private names stay local to
   their existing owners.
 - `getBlobClient/getBlockBlobClient(path)` (public), `getPrivateBlobClient/...` (private).

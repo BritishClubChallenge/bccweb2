@@ -33,14 +33,31 @@ Bootstrap owns the shared resource group and every environment's stamp resource 
 
 ## Storage split (per environment)
 
-Each environment's stamp has **two storage accounts** — infra-only split, no app-code
-change (the API still uses one shared `BlobServiceClient` per connection string, so the
-public/private containers can't themselves be split across accounts):
+Each environment's stamp has **two storage accounts** and a dual-mode application seam:
 
-- **Account A** `stbccweb<env>rt` — backs `AzureWebJobsStorage`: runtime host storage,
-  all ten queues, and the Flex Consumption `deploymentpackage` container.
-- **Account B** `stbccweb<env>data` — backs `BLOB_CONNECTION_STRING`: the `data`
-  (public) and `data-private` containers.
+- **Account A** `stbccweb<env>rt` — runtime host storage, all ten queues, and the Flex
+  Consumption `deploymentpackage` container. Connection-string mode uses
+  `AzureWebJobsStorage`; identity mode uses its hierarchical managed-identity settings.
+- **Account B** `stbccweb<env>data` — the `data` (public) and `data-private` containers.
+  Connection-string mode uses `BLOB_CONNECTION_STRING`; identity mode gives the API its
+  explicit account name and Function UMI client ID.
+
+The environment root exposes three independent rollout inputs:
+
+- `use_identity_storage` (default `false`) selects Function host, deployment, API Blob,
+  and queue identity settings/RBAC instead of storage connection strings.
+- `allow_shared_key_access` (default `true`) controls `allowSharedKeyAccess` on both
+  application storage accounts. It remains independent so identity can be proved before
+  keys are disabled.
+- `operator_principal_id` (default empty) selects the staging GitHub OIDC/Terraform UMI
+  object ID for operator data-plane grants. Leave it empty outside the staged identity
+  apply; it is never the Function UMI client ID.
+
+In identity mode, the Function UMI receives Storage Blob Data Owner plus Storage Queue
+Data Contributor and Storage Table Data Contributor on the runtime account, and Storage
+Blob Data Contributor on the data account. The selected operator OIDC UMI receives
+Storage Queue Data Contributor on the runtime account, Storage Blob Data Contributor on
+the data account, and Storage Blob Data Contributor scoped to `deploymentpackage`.
 
 See [docs/architecture/storage-and-queues.md](../docs/architecture/storage-and-queues.md).
 
@@ -174,6 +191,34 @@ Follow these steps to provision the topology from scratch.
     encounter a `403 Forbidden` error when writing secrets to Key Vault.
     This is caused by Azure RBAC propagation lag. Simply re-run the apply
     to resolve it.
+
+## Staging storage-identity rollout and rollback
+
+This contract is staging-only. Production has not been deployed with identity storage or
+made keyless. First complete the artifact-compatibility prerequisite, then perform the
+two-apply infrastructure rollout:
+
+1. **Artifact prerequisite:** deploy the dual-mode application while staging remains
+   `use_identity_storage = false`, `allow_shared_key_access = true`, with no
+   `operator_principal_id`; record the immutable artifact source SHA.
+2. **Rollout apply 1 — identity:** set `use_identity_storage = true`, retain
+   `allow_shared_key_access = true`, and set `operator_principal_id` to the staging OIDC
+   UMI principal (`4eabcaaf-5340-41b7-9ed2-7b47ebeaa7cd`). The Function workload UMI
+   client ID is `cbbdfdb9-5743-46b9-8ad1-03b94303c0ef`; these identifiers are different
+   kinds and must not be interchanged. Apply RBAC/settings, allow for Azure RBAC
+   propagation lag, then deploy and prove Function and operator read/write paths.
+3. **Rollout apply 2 — Shared Key off:** only after that proof, set
+   `allow_shared_key_access = false` and repeat the keyless checks.
+
+Rollback is also two phases and must not skip directly to connection strings:
+
+1. Re-enable Shared Key on both accounts with `allow_shared_key_access = true` while
+   retaining `use_identity_storage = true`; apply and verify recovery.
+2. Only if identity remains broken, set `use_identity_storage = false` in a second apply,
+   retain Shared Key, and redeploy the prior artifact from its recorded immutable SHA.
+
+Do not remove RBAC or data during rollback. A fresh role assignment can return 403 until
+Azure propagation completes; wait and retry the proof rather than weakening scopes.
 
 ## Secret Rotation
 

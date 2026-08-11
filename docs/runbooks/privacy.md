@@ -65,11 +65,13 @@ Requires Azurite running (`docker compose up azurite`) and containers initialise
 ```sh
 node scripts/init-storage.mjs
 
-# Scan against local Azurite (default):
-node scripts/privacy-scan.mjs
+# Scan against local Azurite explicitly:
+BLOB_CONNECTION_STRING="UseDevelopmentStorage=true" node scripts/privacy-scan.mjs
 
-# Scan against a specific connection string:
-node scripts/privacy-scan.mjs --source "DefaultEndpointsProtocol=https;..."
+# Scan remote staging with the invoking Entra identity (separate approved grant required
+# for a local human; persistent operator roles belong to the staging OIDC UMI):
+az login
+BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata" node scripts/privacy-scan.mjs
 
 # Include bundle regex scan (add fixture emails/phones from test data):
 node scripts/privacy-scan.mjs --bundle-patterns "test@example\.com,\+447\d+"
@@ -121,6 +123,13 @@ default 24-hour safety threshold. Review the dry-run output first, then rerun wi
 operationally justified. The script never deletes a referenced blob and refreshes the
 round reference set immediately before deletion.
 
+For remote staging, authenticate with `az login` and export
+`BLOB_STORAGE_ACCOUNT_NAME=stbccwebstagingdata` before either dry run or delete. Do not
+use a remote storage connection string or the Function App UMI. Persistent operator
+roles belong to the staging OIDC UMI; a local human needs a separately approved grant.
+For local Azurite, retain
+`BLOB_CONNECTION_STRING="UseDevelopmentStorage=true"`.
+
 ## FAI Signature Validation: Outbound PII Egress
 
 `apps/api/src/lib/faiVali.ts` (`validateIgcSignature`) uploads the raw IGC file for a
@@ -170,6 +179,11 @@ service outside our control.
   and attempts that already have a durable result, and reuses each eligible flight's
   existing attempt ID. Per the approved policy, a `pending` flight continues to score in
   the interim, including if the round completes before recovery.
+  Remote staging execution requires `az login`,
+  `BLOB_STORAGE_ACCOUNT_NAME=stbccwebstagingdata`, and
+  `RUNTIME_STORAGE_ACCOUNT_NAME=stbccwebstagingrt` because it reads blobs and sends a
+  queue message. Local Azurite keeps `BLOB_CONNECTION_STRING="UseDevelopmentStorage=true"`
+  and `AzureWebJobsStorage="UseDevelopmentStorage=true"`.
 - **Changing a round's date**: `updateRound` clears any stale `IGC_DATE_MISMATCH`
   sanity flag and drops the flight's stored date verdict when the round date changes, but
   it does not re-parse the IGC file. It only re-scores existing distances against the new

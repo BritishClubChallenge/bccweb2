@@ -12,6 +12,10 @@ stamp_rg_name                = "stamp-staging"
 allowed_origins = ["https://nice-desert-0f55cb503-staging.westeurope.7.azurestaticapps.net"]
 tags            = {}
 
+# Staged storage rollout: deploy the dual-mode artifact before enabling identity.
+use_identity_storage    = false
+allow_shared_key_access = true
+
 jwt_secret_version = "1"
 acs_secret_version = "1"
 blob_schema_mode   = "observe"

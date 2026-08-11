@@ -35,8 +35,12 @@ Root-package operator scripts use `lib/storageClients.mjs`. Local/Azurite execut
 `BLOB_CONNECTION_STRING` and `AzureWebJobsStorage`; remote keyless execution requires
 `BLOB_STORAGE_ACCOUNT_NAME` for data blobs and `RUNTIME_STORAGE_ACCOUNT_NAME` for queues,
 authenticated as the invoking operator/OIDC identity through `DefaultAzureCredential`.
-Do not bind these scripts to the Function App managed identity. `init-storage.mjs` remains
-an Azurite-only Shared Key REST bootstrap and deliberately does not use the adapter.
+Do not bind these scripts to the Function App managed identity or set
+`STORAGE_UMI_CLIENT_ID` for them: that setting belongs to the API adapter. Persistent
+remote data/queue/deployment-package roles belong to the staging GitHub OIDC UMI; a local
+human using `az login` needs a separately approved grant. Production has not adopted this
+staging identity contract. `init-storage.mjs` remains an Azurite-only Shared Key REST
+bootstrap and deliberately does not use the adapter.
 
 ## `privacy-scan.mjs` — CI success gate
 

@@ -156,14 +156,24 @@ All producers/triggers use the `AzureWebJobsStorage` connection only; never
 `IgcValidationJobSchema`) are all `.strict()` so PII can never enter a queue message —
 `privacy-scan.mjs` does not cover queues, so these schemas are the compensating control.
 
-**Two storage accounts per env** (infra-only split; no app-code change — the API still
-uses one shared `BlobServiceClient` per connection string, so `data`/`data-private`
-still can't be split across accounts): Account A `stbccweb<env>rt` backs
-`AzureWebJobsStorage` — runtime host storage, all ten queues, and the Flex Consumption
-`deploymentpackage` container; Account B `stbccweb<env>data` backs
-`BLOB_CONNECTION_STRING` — the `data`/`data-private` containers only. See
+**Two storage accounts per env**: Account A `stbccweb<env>rt` is the runtime plane —
+Functions host storage, all ten queues, and the Flex Consumption `deploymentpackage`
+container. Account B `stbccweb<env>data` is the application blob plane — the `data`/
+`data-private` containers only. `apps/api/src/lib/storageClients.ts` is the API's sole
+dual-mode SDK-construction seam: local/dev/Azurite keeps `AzureWebJobsStorage` and
+`BLOB_CONNECTION_STRING`; Azure identity mode uses `RUNTIME_STORAGE_ACCOUNT_NAME`/
+`BLOB_STORAGE_ACCOUNT_NAME` plus `STORAGE_UMI_CLIENT_ID`. The Functions host itself uses
+`AzureWebJobsStorage__accountName`, `AzureWebJobsStorage__credential=managedidentity`, and
+`AzureWebJobsStorage__clientId`. See
 [docs/architecture/storage-and-queues.md](docs/architecture/storage-and-queues.md) for
 the full split.
+
+The Function UMI is the deployed workload identity for host/data access. It is distinct
+from the staging GitHub OIDC/Terraform UMI used by remote operator scripts and deployment
+automation; never configure scripts to impersonate the Function UMI. Persistent operator
+storage roles belong only to that staging OIDC UMI. Local humans use `az login` only after
+a separately approved data-plane grant. Identity rollout is staging-only; production is
+not deployed or keyless, and local Azurite remains connection-string based.
 
 Full container/family/flow reference (containers, all ten queues, brief PDF/sign
 reflect/rescore/PureTrack/IGC-validation flows, CAS/attempt semantics, poison
@@ -196,7 +206,10 @@ test-isolation gotchas: [apps/api/AGENTS.md](apps/api/AGENTS.md). Handler conven
 `RoundsCoord` users have a `clubId` scoping their writes.
 
 **Env** ([local.settings.example.json](apps/api/local.settings.example.json)):
-`AzureWebJobsStorage`, `BLOB_CONNECTION_STRING`, `BLOB_CONTAINER_NAME` (`data`),
+local/dev uses `AzureWebJobsStorage` and `BLOB_CONNECTION_STRING`; Azure identity mode uses
+`AzureWebJobsStorage__accountName`/`__credential`/`__clientId`,
+`RUNTIME_STORAGE_ACCOUNT_NAME`, `BLOB_STORAGE_ACCOUNT_NAME`, and
+`STORAGE_UMI_CLIENT_ID`. Both modes also use `BLOB_CONTAINER_NAME` (`data`),
 `BLOB_PRIVATE_CONTAINER_NAME` (`data-private`), `JWT_SECRET` (≥32 chars),
 `ACS_CONNECTION_STRING`, `ACS_SENDER_ADDRESS`, `PURETRACK_*`, `FAI_VALI_ENABLED`
 (process-level kill switch for FAI signature validation), `FAI_VALI_BASE_URL`,
