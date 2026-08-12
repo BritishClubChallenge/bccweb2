@@ -47,6 +47,29 @@ resource "azapi_resource" "storage_runtime" {
   }
 }
 
+# Azure omits allowSharedKeyAccess from GET until it is explicitly set, so the
+# parent body alone can be silently ignored; this update forces the first PUT.
+resource "azapi_update_resource" "storage_runtime_shared_key" {
+  type        = "Microsoft.Storage/storageAccounts@2025-06-01"
+  resource_id = azapi_resource.storage_runtime.id
+
+  body = {
+    properties = {
+      allowSharedKeyAccess = false
+    }
+  }
+
+  depends_on = [
+    azapi_resource.fn_runtime_blob_owner_role,
+    azapi_resource.fn_runtime_queue_contributor_role,
+    azapi_resource.fn_runtime_table_contributor_role,
+    azapi_resource.fn_data_blob_contributor_role,
+    azapi_resource.operator_runtime_queue_contributor_role,
+    azapi_resource.operator_deployment_blob_contributor_role,
+    azapi_resource.operator_data_blob_contributor_role,
+  ]
+}
+
 # The runtime blob service intentionally has no versioning, CORS, change feed,
 # or soft-delete policy. It exists only for Functions runtime state and the Flex
 # deployment package container used by the later Flex migration.
@@ -201,6 +224,29 @@ resource "azapi_resource" "storage_data" {
       error_message = "Data storage account name must not exceed 24 characters."
     }
   }
+}
+
+# Azure omits allowSharedKeyAccess from GET until it is explicitly set, so the
+# parent body alone can be silently ignored; this update forces the first PUT.
+resource "azapi_update_resource" "storage_data_shared_key" {
+  type        = "Microsoft.Storage/storageAccounts@2025-06-01"
+  resource_id = azapi_resource.storage_data.id
+
+  body = {
+    properties = {
+      allowSharedKeyAccess = false
+    }
+  }
+
+  depends_on = [
+    azapi_resource.fn_runtime_blob_owner_role,
+    azapi_resource.fn_runtime_queue_contributor_role,
+    azapi_resource.fn_runtime_table_contributor_role,
+    azapi_resource.fn_data_blob_contributor_role,
+    azapi_resource.operator_runtime_queue_contributor_role,
+    azapi_resource.operator_deployment_blob_contributor_role,
+    azapi_resource.operator_data_blob_contributor_role,
+  ]
 }
 
 # Prevent accidental deletion of production data. Non-production environments

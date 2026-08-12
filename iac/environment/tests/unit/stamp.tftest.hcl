@@ -612,6 +612,18 @@ run "storage_identity_and_rbac_are_unconditional" {
 
   assert {
     condition = (
+      azapi_update_resource.storage_runtime_shared_key.type == "Microsoft.Storage/storageAccounts@2025-06-01" &&
+      azapi_update_resource.storage_runtime_shared_key.resource_id == azapi_resource.storage_runtime.id &&
+      azapi_update_resource.storage_runtime_shared_key.body.properties.allowSharedKeyAccess == false &&
+      azapi_update_resource.storage_data_shared_key.type == "Microsoft.Storage/storageAccounts@2025-06-01" &&
+      azapi_update_resource.storage_data_shared_key.resource_id == azapi_resource.storage_data.id &&
+      azapi_update_resource.storage_data_shared_key.body.properties.allowSharedKeyAccess == false
+    )
+    error_message = "Explicit update resources must target both storage accounts and force allowSharedKeyAccess=false through the storage account API."
+  }
+
+  assert {
+    condition = (
       azapi_resource.storage_runtime.ignore_missing_property == false &&
       azapi_resource.storage_data.ignore_missing_property == false
     )
