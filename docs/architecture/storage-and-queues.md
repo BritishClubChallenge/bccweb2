@@ -73,8 +73,12 @@ Cut staging over with one `environment/staging` `terraform apply`, using the man
 `.github/workflows/terraform.yml` workflow or the equivalent local command, then redeploy
 through the existing `deploy-staging.yml` → `deploy-app.yml` path. A brief staging
 interruption between the infrastructure apply and application redeploy is acceptable and
-expected. Afterward, dispatch `staging-storage-operator-smoke.yml` to run the non-mutating
-queue verifier and dedicated blob/queue canaries.
+expected. Storage assurance is continuous rather than dispatch-only: the staging
+`env-drift` gate reads remote Terraform state before every deployment, and the deployment
+pipeline's managed-identity package upload proves OIDC write access to the runtime
+account's `deploymentpackage` container. Its post-deploy API smoke exercises application
+blob access, registered queue triggers continuously exercise runtime queues, and
+`privacy-scan.yml` remains the dedicated public-container PII gate.
 
 Rollback is source-driven: `git revert` the secure-storage change, re-apply the reverted
 environment configuration, and redeploy the prior artifact. There are no storage-auth

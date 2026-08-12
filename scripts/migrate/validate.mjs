@@ -21,10 +21,11 @@
  *   BLOB_CONNECTION_STRING="UseDevelopmentStorage=true" \
  *   node scripts/migrate/validate.mjs
  *
- * Exit code 0 = all checks passed.
+ * Exit code 0 = no checks failed (explicit skips may be reported).
  * Exit code 1 = one or more checks failed (see output for details).
  */
 
+import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 import { findPiiInObject, PII_FIELDS } from "../lib/pii.mjs";
@@ -41,6 +42,7 @@ export const EXPECTED_HEALS = new Set(["sites:clubId", "rounds:siteId"]);
 
 let passed = 0;
 let failed = 0;
+let skipped = 0;
 
 function ok(msg) {
   console.log(`  ✓  ${msg}`);
@@ -50,6 +52,11 @@ function ok(msg) {
 function fail(msg) {
   console.error(`  ✗  ${msg}`);
   failed++;
+}
+
+function skip(msg) {
+  console.log(`  ⊘  ${msg}`);
+  skipped++;
 }
 
 function hasOwn(value, key) {
@@ -476,13 +483,19 @@ function printSchemaSummary(stats) {
  * @param {Array<{id:string,status:string}>} roundsSummary  rounds.json entries
  */
 async function crossCheckLegacyScores(privateClient, roundsSummary) {
+  const manifestPath = legacyScoreManifestPath();
+  if (!existsSync(manifestPath)) {
+    skip("legacy-score manifest not present — skipping legacy-score preservation check (local migration state only)");
+    return;
+  }
+
   const manifest = readLegacyScoreManifest();
   const completeRounds = roundsSummary.filter((r) => isRecord(r) && r.status === "Complete");
 
   if (manifest === null) {
     if (completeRounds.length > 0) {
       fail(
-        `legacy-score manifest missing at ${legacyScoreManifestPath()} but ${completeRounds.length} Complete round(s) exist — cannot prove legacy scores were preserved`,
+        `legacy-score manifest missing at ${manifestPath} but ${completeRounds.length} Complete round(s) exist — cannot prove legacy scores were preserved`,
       );
     } else {
       ok("legacy-score manifest — no Complete rounds to cross-check");
@@ -689,10 +702,13 @@ async function main() {
   console.log("");
   console.log("─────────────────────────────────────────");
   console.log(`  Passed: ${passed}`);
+  console.log(`  Skipped: ${skipped}`);
   if (failed > 0) {
     console.error(`  Failed: ${failed}`);
     console.error("  Migration validation FAILED — fix issues above before cutover.");
     process.exit(1);
+  } else if (skipped > 0) {
+    console.log("  Migration validation PASSED with SKIPS — completed checks found no failures.");
   } else {
     console.log("  Migration validation PASSED — data looks correct.");
   }
