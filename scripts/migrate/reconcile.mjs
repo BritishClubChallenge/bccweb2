@@ -20,7 +20,11 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { join } from "node:path";
 import { readDiscardedCounts } from "./discarded-counts.mjs";
 import { readNormalizationCounts } from "./normalization-counts.mjs";
-import { blobServiceUrl } from "./blobClient.mjs";
+import {
+  summarizeSqlConnectionString,
+  summarizeStorageAccount,
+  summarizeStorageConnectionString,
+} from "./connectionSummary.mjs";
 
 const STATE_DIR = ".migration-state";
 const MAP_PATH = join(STATE_DIR, "id-map.json");
@@ -49,15 +53,6 @@ function readJsonFile(path, label) {
   } catch (err) {
     fail(`Failed to parse ${label} at ${path}: ${err.message}`);
   }
-}
-
-function maskConnectionString(value) {
-  if (!value) return null;
-  return value
-    .replace(/Password=[^;]+/gi, "Password=***")
-    .replace(/AccountKey=[^;]+/gi, "AccountKey=***")
-    .replace(/SharedAccessSignature=[^?&"'\s]+/gi, "SharedAccessSignature=***")
-    .replace(/Authorization:\s*\S+/gi, "Authorization:***");
 }
 
 if (!existsSync(MAP_PATH)) {
@@ -205,12 +200,15 @@ if (prodSnapshotPath) {
     anomalies.push(...row.anomalies.map((a) => ({ ...a, entity: row.entity })));
   }
 
+  const sqlConnection = process.env.PROD_SQL_CONN ?? process.env.SQL_CONNECTION_STRING;
+  const blobConnection = process.env.PROD_BLOB_CONN ?? process.env.BLOB_CONNECTION_STRING;
   source = {
-    sqlConn: maskConnectionString(process.env.PROD_SQL_CONN ?? process.env.SQL_CONNECTION_STRING),
-    blobConn: maskConnectionString(process.env.PROD_BLOB_CONN ?? process.env.BLOB_CONNECTION_STRING) ??
-      (process.env.BLOB_STORAGE_ACCOUNT_NAME
-        ? blobServiceUrl(process.env.BLOB_STORAGE_ACCOUNT_NAME)
-        : null),
+    sql: sqlConnection ? summarizeSqlConnectionString(sqlConnection) : null,
+    blob: blobConnection
+      ? summarizeStorageConnectionString(blobConnection)
+      : (process.env.BLOB_STORAGE_ACCOUNT_NAME
+          ? summarizeStorageAccount(process.env.BLOB_STORAGE_ACCOUNT_NAME)
+          : null),
     prodSnapshot: prodSnapshotPath,
     dryRunStdout: existsSync(STDOUT_PATH) ? STDOUT_PATH : null,
   };

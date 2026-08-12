@@ -11,7 +11,7 @@
 #
 # STAGING_BLOB_CONN takes precedence when both staging target variables are set.
 # Use --print-config to validate the selected downstream configuration without
-# contacting SQL or Azure; connection strings are masked in this output.
+# contacting SQL or Azure; only non-secret target summaries are printed.
 
 set -euo pipefail
 
@@ -21,20 +21,15 @@ REPORT_PATH="$STATE_DIR/prod-dryrun-report.json"
 PROD_SNAPSHOT_PATH="$STATE_DIR/prod-blob-snapshot.json"
 PUBLIC_CONTAINER="${BLOB_CONTAINER:-data}"
 PRIVATE_CONTAINER="${BLOB_PRIVATE_CONTAINER:-data-private}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 fail() {
   printf 'ERROR: %s\n' "$1" >&2
   exit 1
 }
 
-mask_connection_string() {
-  node -e '
-    const value = process.argv[1] || "";
-    console.log(value
-      .replace(/Password=[^;]+/gi, "Password=***")
-      .replace(/AccountKey=[^;]+/gi, "AccountKey=***")
-      .replace(/SharedAccessSignature=[^?&"\x27\s]+/gi, "SharedAccessSignature=***"));
-  ' "${1:-}"
+connection_summary() {
+  CONNECTION_STRING_TO_SUMMARIZE="${2:-}" node "$SCRIPT_DIR/connectionSummary.mjs" "$1"
 }
 
 require_env() {
@@ -55,17 +50,18 @@ with_staging_blob_auth() {
 print_config() {
   local selected_config target
   if [[ -n "${STAGING_BLOB_CONN:-}" ]]; then
-    target="$(mask_connection_string "$STAGING_BLOB_CONN")"
+    target="$(connection_summary storage "$STAGING_BLOB_CONN")"
     selected_config="$(with_staging_blob_auth node -e '
       const connection = Reflect.get(process.env, "BLOB_CONNECTION_STRING");
       const account = Reflect.get(process.env, "BLOB_STORAGE_ACCOUNT_NAME");
       if (!connection || account) process.exit(1);
-      process.stdout.write("BLOB_CONNECTION_STRING=" + process.argv[1] + "; BLOB_STORAGE_ACCOUNT_NAME=<unset>");
-    ' "$target")"
+      process.stdout.write("BLOB_CONNECTION_STRING=<configured>; BLOB_STORAGE_ACCOUNT_NAME=<unset>");
+    ')"
     printf 'Selected staging auth: connection string (STAGING_BLOB_CONN precedence)\n'
+    printf 'Blob target: %s\n' "$target"
     printf 'Container setup env: %s\n' "$selected_config"
     printf 'Migration env: %s\n' "$selected_config"
-    printf 'Privacy scan: --source %s; BLOB_STORAGE_ACCOUNT_NAME=<unset>\n' "$target"
+    printf 'Privacy scan env: %s; --source omitted\n' "$selected_config"
   else
     selected_config="$(with_staging_blob_auth node -e '
       const connection = Reflect.get(process.env, "BLOB_CONNECTION_STRING");
@@ -116,14 +112,14 @@ NODE
 )
 
 printf '=== BCC production migration dry-run ===\n'
-printf 'SQL source: %s\n' "$(mask_connection_string "$PROD_SQL_CONN")"
+printf 'SQL source: %s\n' "$(connection_summary sql "$PROD_SQL_CONN")"
 if [[ -n "${STAGING_BLOB_CONN:-}" ]]; then
-  printf 'Staging blob target: %s\n' "$(mask_connection_string "$STAGING_BLOB_CONN")"
+  printf 'Staging blob target: %s\n' "$(connection_summary storage "$STAGING_BLOB_CONN")"
 else
   printf 'Staging blob target: account=%s (DefaultAzureCredential)\n' "$STAGING_BLOB_ACCOUNT"
 fi
 if [[ -n "${PROD_BLOB_CONN:-}" ]]; then
-  printf 'Production blob comparison: %s\n' "$(mask_connection_string "$PROD_BLOB_CONN")"
+  printf 'Production blob comparison: %s\n' "$(connection_summary storage "$PROD_BLOB_CONN")"
 else
   printf 'Production blob comparison: skipped (PROD_BLOB_CONN not set)\n'
 fi
@@ -191,7 +187,12 @@ const stdout = process.env.STDOUT_PATH;
 const out = process.env.PROD_SNAPSHOT_PATH;
 
 function az(args, options = {}) {
-  return execFileSync("az", args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, ...options });
+  return execFileSync("az", args, {
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
+    env: { ...process.env, AZURE_STORAGE_CONNECTION_STRING: conn },
+    ...options,
+  });
 }
 
 function parsePlannedPaths(text) {
@@ -237,7 +238,6 @@ function expectedEntityCounts(text) {
 
 const listed = az([
   "storage", "blob", "list",
-  "--connection-string", conn,
   "--container-name", container,
   "--query", "[].name",
   "-o", "tsv",
@@ -320,11 +320,7 @@ PROD_SQL_CONN="$PROD_SQL_CONN" PROD_BLOB_CONN="${PROD_BLOB_CONN:-}" \
 node scripts/migrate/reconcile.mjs --against-prod-snapshot "$PROD_SNAPSHOT_PATH"
 
 printf 'Step 6/6: running privacy-scan.mjs against staging public blobs...\n'
-if [[ -n "${STAGING_BLOB_CONN:-}" ]]; then
-  BLOB_CONTAINER_NAME="$PUBLIC_CONTAINER" node scripts/privacy-scan.mjs --source "$STAGING_BLOB_CONN"
-else
-  with_staging_blob_auth env BLOB_CONTAINER_NAME="$PUBLIC_CONTAINER" node scripts/privacy-scan.mjs
-fi
+with_staging_blob_auth env BLOB_CONTAINER_NAME="$PUBLIC_CONTAINER" node scripts/privacy-scan.mjs
 
 printf '\n=== Production dry-run summary ===\n'
 node --input-type=module - <<'NODE'
