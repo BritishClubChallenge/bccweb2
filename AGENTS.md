@@ -150,8 +150,12 @@ container.
 rescore, PureTrack group, IGC signature/date validation — each a main queue plus a
 `-poison` dead-letter. Rescore normally records failures on its job-status blob; its
 poison queue remains a host-failure safety net rather than an HTTP-visible retry path.
-All producers/triggers use the `AzureWebJobsStorage` connection only; never
-`BLOB_CONNECTION_STRING`. Queue job schemas (`BriefPdfJobSchema`,
+Locally, producers and triggers both use the `AzureWebJobsStorage` connection string. In
+deployed Azure, producers use `RUNTIME_STORAGE_ACCOUNT_NAME` plus `STORAGE_UMI_CLIENT_ID`
+(via `storageClients.ts`) while the host's triggers use the hierarchical
+`AzureWebJobsStorage__accountName`/`__credential`/`__clientId` settings. Never use
+`BLOB_CONNECTION_STRING`, which is blob-only and would silently break queueing. Queue job
+schemas (`BriefPdfJobSchema`,
 `SignToFlyReflectJobSchema`, `PureTrackGroupJobSchema`, `RescoreJobMessageSchema`,
 `IgcValidationJobSchema`) are all `.strict()` so PII can never enter a queue message —
 `privacy-scan.mjs` does not cover queues, so these schemas are the compensating control.

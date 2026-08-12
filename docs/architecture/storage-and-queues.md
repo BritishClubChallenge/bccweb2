@@ -105,7 +105,7 @@ valid for non-JSON artifacts and explicitly justified lease/index operations.
 
 ## Storage Queues
 
-Ten queues, all in Account A (`stbccweb<env>rt`, the `AzureWebJobsStorage` account — see
+Ten queues, all in Account A (`stbccweb<env>rt`, the runtime account — see
 "Two storage accounts per environment" above), across five families, each a main queue
 plus a `-poison` dead-letter queue (`maxDequeueCount=5` in `host.json`). In Azure, the
 `queue_service` and ten queue resources in
@@ -132,11 +132,23 @@ unreachable the script throws and exits non-zero. Blob containers are created ea
 the same run, so a queue-service outage still surfaces as a hard failure rather than a
 partial success.
 
-**Connection invariant**: every producer (`apps/api/src/lib/queue.ts`,
-`apps/api/src/lib/rescoreJob.ts`, and `apps/api/src/lib/igcValidationJob.ts`) and every
-`app.storageQueue` trigger uses the
-`AzureWebJobsStorage` connection setting — the only setting carrying a `QueueEndpoint` in
-local/Docker. `BLOB_CONNECTION_STRING` is blob-only; using it would silently break queueing.
+**Connection invariant**: every producer and every `app.storageQueue` trigger reaches the
+same runtime account (`stbccweb<env>rt`), but not through the same setting, and
+`BLOB_CONNECTION_STRING` is blob-only in both modes. Using it for queueing would silently
+break it.
+
+- **Local/dev/Docker/Azurite**: producers (`apps/api/src/lib/queue.ts`,
+  `apps/api/src/lib/rescoreJob.ts`, `apps/api/src/lib/igcValidationJob.ts`, via the
+  `storageClients.ts` seam) and every trigger both read the `AzureWebJobsStorage`
+  connection string, the only setting carrying a `QueueEndpoint` locally.
+- **Deployed Azure**: the split is producer vs. trigger, not shared. Producers go through
+  `storageClients.ts`'s `getRuntimeQueueClient`, which builds a `QueueClient` from
+  `RUNTIME_STORAGE_ACCOUNT_NAME` plus `STORAGE_UMI_CLIENT_ID` (the Function UMI). The
+  Functions host's `app.storageQueue` triggers instead resolve the hierarchical
+  `AzureWebJobsStorage__accountName`, `AzureWebJobsStorage__credential=managedidentity`,
+  and `AzureWebJobsStorage__clientId` settings directly. There is no plain
+  `AzureWebJobsStorage` connection string in Azure, so do not restore one during or after
+  the cutover.
 
 **Queue privacy**: `privacy-scan.mjs` does not cover Storage Queues. The compensating
 control is strict, `.strict()` job schemas in `apps/api/src/lib/queue.ts`,

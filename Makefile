@@ -54,7 +54,7 @@ test-integration: ## Run opt-in PureTrack LIVE-API integration tests (needs apps
 	VITEST_INTEGRATION=1 npx vitest run --project @bccweb/api
 
 .PHONY: validate-bacpac
-validate-bacpac: ## Opt-in real BACPAC migration validation (self-skips without BACPAC_PATH/sqlpackage)
+validate-bacpac: ## Real BACPAC validation via blob connection/account identity; defaults Azurite, self-skips without BACPAC_PATH/sqlpackage
 	scripts/migrate/validate-against-bacpac.sh
 
 .PHONY: dev
