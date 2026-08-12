@@ -19,7 +19,7 @@
 # then STAGING_BLOB_ACCOUNT. Connection strings therefore win over identity.
 # With none set, the existing local Azurite connection-string default is used.
 # Use --print-config to validate the selected downstream configuration without
-# contacting SQL or Azure; connection strings are masked in this output.
+# contacting SQL or Azure; only non-secret target summaries are printed.
 
 set -euo pipefail
 
@@ -34,14 +34,8 @@ fail() {
   exit 1
 }
 
-mask_connection_string() {
-  node -e '
-    const value = process.argv[1] || "";
-    console.log(value
-      .replace(/Password=[^;]+/gi, "Password=***")
-      .replace(/AccountKey=[^;]+/gi, "AccountKey=***")
-      .replace(/SharedAccessSignature=[^?&"\x27\s]+/gi, "SharedAccessSignature=***"));
-  ' "${1:-}"
+connection_summary() {
+  CONNECTION_STRING_TO_SUMMARIZE="${2:-}" node "$SCRIPT_DIR/connectionSummary.mjs" "$1"
 }
 
 BACPAC_BLOB_CONN_VALUE="${BACPAC_BLOB_CONN:-${STAGING_BLOB_CONN:-}}"
@@ -71,20 +65,20 @@ with_staging_blob_auth() {
 print_config() {
   local selected_config target
   if [[ -n "$BACPAC_BLOB_CONN_VALUE" ]]; then
-    target="$(mask_connection_string "$BACPAC_BLOB_CONN_VALUE")"
+    target="$(connection_summary storage "$BACPAC_BLOB_CONN_VALUE")"
     selected_config="$(with_staging_blob_auth node -e '
       const connection = Reflect.get(process.env, "BLOB_CONNECTION_STRING");
       const account = Reflect.get(process.env, "BLOB_STORAGE_ACCOUNT_NAME");
       if (!connection || account) process.exit(1);
-      process.stdout.write("BLOB_CONNECTION_STRING=" + process.argv[1] + "; BLOB_STORAGE_ACCOUNT_NAME=<unset>");
-    ' "$target")"
+      process.stdout.write("BLOB_CONNECTION_STRING=<configured>; BLOB_STORAGE_ACCOUNT_NAME=<unset>");
+    ')"
     printf 'Selected BACPAC blob auth: connection string (%s)\n' "$BACPAC_BLOB_AUTH_SOURCE"
     printf 'Blob target: %s\n' "$target"
     printf 'Container setup env: %s\n' "$selected_config"
     printf 'Migration env: %s\n' "$selected_config"
     printf 'Validation env: %s\n' "$selected_config"
     printf 'Cleanup env: %s\n' "$selected_config"
-    printf 'Privacy scan: --source %s; BLOB_STORAGE_ACCOUNT_NAME=<unset>\n' "$target"
+    printf 'Privacy scan env: %s; --source omitted\n' "$selected_config"
   else
     selected_config="$(with_staging_blob_auth node -e '
       const connection = Reflect.get(process.env, "BLOB_CONNECTION_STRING");
@@ -242,9 +236,9 @@ mkdir -p "$TMP_DIR"
 
 printf '=== BCC BACPAC migration validation ===\n'
 printf 'BACPAC: %s\n' "$BACPAC_PATH_ABS"
-printf 'SQL target: %s\n' "$(mask_connection_string "$BACPAC_TARGET_CONN")"
+printf 'SQL target: %s\n' "$(connection_summary sql "$BACPAC_TARGET_CONN")"
 if [[ -n "$BACPAC_BLOB_CONN_VALUE" ]]; then
-  printf 'Blob target: %s\n' "$(mask_connection_string "$BACPAC_BLOB_CONN_VALUE")"
+  printf 'Blob target: %s\n' "$(connection_summary storage "$BACPAC_BLOB_CONN_VALUE")"
 else
   printf 'Blob target: account=%s (DefaultAzureCredential)\n' "$BACPAC_BLOB_ACCOUNT_VALUE"
 fi
@@ -300,13 +294,8 @@ printf 'Step 5/6: running reconcile.mjs and asserting no anomalies...\n'
 printf 'Step 6/6: running privacy-scan.mjs against the public throwaway container...\n'
 (
   cd "$TMP_DIR"
-  if [[ -n "$BACPAC_BLOB_CONN_VALUE" ]]; then
-    with_staging_blob_auth env BLOB_CONTAINER_NAME="$PUBLIC_CONTAINER" \
-      node "$REPO_ROOT/scripts/privacy-scan.mjs" --source "$BACPAC_BLOB_CONN_VALUE"
-  else
-    with_staging_blob_auth env BLOB_CONTAINER_NAME="$PUBLIC_CONTAINER" \
-      node "$REPO_ROOT/scripts/privacy-scan.mjs"
-  fi
+  with_staging_blob_auth env BLOB_CONTAINER_NAME="$PUBLIC_CONTAINER" \
+    node "$REPO_ROOT/scripts/privacy-scan.mjs"
 )
 
 printf '\nBACPAC validation PASSED: real migration blobs satisfy schema gate, reconcile, and privacy scan.\n'

@@ -69,6 +69,35 @@ export function parseArgs(argv) {
   return { help: false, mode, olderThanHours };
 }
 
+function isLocalBlobConnection(connectionString) {
+  const settings = new Map();
+  for (const part of connectionString.split(";")) {
+    if (part.length === 0) continue;
+    const separator = part.indexOf("=");
+    if (separator <= 0) return false;
+    const key = part.slice(0, separator).trim().toLowerCase();
+    if (key.length === 0 || settings.has(key)) return false;
+    settings.set(key, part.slice(separator + 1).trim());
+  }
+
+  if (settings.get("usedevelopmentstorage")?.toLowerCase() === "true") return true;
+  const endpoint = settings.get("blobendpoint");
+  if (!endpoint) return false;
+
+  try {
+    const url = new URL(endpoint);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    const hostname = url.hostname.toLowerCase();
+    const unbracketed = hostname.startsWith("[") && hostname.endsWith("]")
+      ? hostname.slice(1, -1)
+      : hostname;
+    return unbracketed === "localhost" || unbracketed === "127.0.0.1" ||
+      unbracketed === "::1";
+  } catch {
+    return false;
+  }
+}
+
 export function queueConnectionString() {
   const configured = process.env.AzureWebJobsStorage;
   if (typeof configured === "string" && configured.length > 0) return configured;
@@ -80,8 +109,7 @@ export function queueConnectionString() {
   if (
     !(typeof blobAccountName === "string" && blobAccountName.length > 0) &&
     (blobConnection === undefined ||
-      blobConnection.includes("localhost") ||
-      blobConnection.includes("127.0.0.1"))
+      isLocalBlobConnection(blobConnection))
   ) {
     return LOCAL_AZURITE_QUEUE_CONNECTION;
   }

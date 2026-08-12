@@ -250,8 +250,31 @@ const queueConnectionCases = [
     LOCAL_AZURITE_QUEUE_CONNECTION],
   ["a local blob connection selects the Azurite queue",
     { BLOB_CONNECTION_STRING: AZURITE_DEV_CS }, LOCAL_AZURITE_QUEUE_CONNECTION],
+  ["the development storage shorthand selects the Azurite queue",
+    { BLOB_CONNECTION_STRING: "UseDevelopmentStorage=true" },
+    LOCAL_AZURITE_QUEUE_CONNECTION],
+  ["an exact localhost blob endpoint selects the Azurite queue",
+    { BLOB_CONNECTION_STRING: "BlobEndpoint=http://localhost:10000/devstoreaccount1" },
+    LOCAL_AZURITE_QUEUE_CONNECTION],
+  ["an exact IPv6 loopback blob endpoint selects the Azurite queue",
+    { BLOB_CONNECTION_STRING: "BlobEndpoint=http://[::1]:10000/devstoreaccount1" },
+    LOCAL_AZURITE_QUEUE_CONNECTION],
   ["a remote blob connection fails closed without queue configuration",
     { BLOB_CONNECTION_STRING: REMOTE_BLOB_CONNECTION }, EXPECT_QUEUE_CONFIGURATION_ERROR],
+  ["a remote account name containing localhost fails closed", {
+      BLOB_CONNECTION_STRING:
+        "DefaultEndpointsProtocol=https;AccountName=localhostdata;EndpointSuffix=core.windows.net",
+    }, EXPECT_QUEUE_CONFIGURATION_ERROR],
+  ["a remote endpoint host containing localhost fails closed", {
+      BLOB_CONNECTION_STRING:
+        "BlobEndpoint=https://localhostdata.blob.core.windows.net/container",
+    }, EXPECT_QUEUE_CONFIGURATION_ERROR],
+  ["a remote endpoint host containing an IPv4 loopback substring fails closed", {
+      BLOB_CONNECTION_STRING: "BlobEndpoint=https://127.0.0.1.example.com/container",
+    }, EXPECT_QUEUE_CONFIGURATION_ERROR],
+  ["a malformed blob connection fails closed", {
+      BLOB_CONNECTION_STRING: "BlobEndpoint=not-a-url",
+    }, EXPECT_QUEUE_CONFIGURATION_ERROR],
   ["an empty blob storage account remains an unconfigured local target",
     { BLOB_STORAGE_ACCOUNT_NAME: "" }, LOCAL_AZURITE_QUEUE_CONNECTION],
 ];
