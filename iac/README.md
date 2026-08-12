@@ -203,10 +203,22 @@ cutover is one `terraform apply`, either through the manual `terraform.yml` work
 locally, followed by a redeploy of the application. A brief staging interruption during
 the cutover is acceptable.
 
-Rollback is `git revert` of the secure-storage change, followed by one re-apply and a
-redeploy of the prior artifact. Do not remove RBAC or data during rollback. A fresh role
-assignment can return 403 until Azure propagation completes; wait and retry rather than
-weakening scopes.
+Rollback has two tiers, and they are not interchangeable:
+
+- **Preferred — targeted revert (fast, small blast radius)**: commit a rollback that
+  restores only what broke the app — the connection-string app settings, the key-based
+  package deployment, and `allowSharedKeyAccess = true` on both storage accounts — while
+  leaving `storage-rbac.tf` and its seven role assignments in place. Unused role
+  assignments are inert, and keeping them means a later roll-forward skips waiting on
+  Azure RBAC propagation again.
+- **Full revert (simpler, slower to roll forward)**: `git revert` the whole secure-storage
+  change. This deletes `storage-rbac.tf`, so the next apply destroys all seven role
+  assignments. Rolling forward afterward re-creates them and is subject to propagation
+  delay again.
+
+In both tiers, no data and no storage topology is removed; only the role assignments
+differ between them. A fresh role assignment can return 403 until Azure propagation
+completes; wait and retry rather than weakening scopes.
 
 ## Secret Rotation
 

@@ -69,10 +69,6 @@ function canonicalEndpoint(values, service) {
     const port = service === "blob" ? 10000 : 10001;
     return `http://127.0.0.1:${port}/${DEVELOPMENT_STORAGE_ACCOUNT}`;
   }
-  const accountName = values.get("accountname");
-  if (!accountName) {
-    throw new StorageConfigurationError("Storage connection string is missing AccountName");
-  }
   const explicitEndpoint = values.get(`${service}endpoint`);
   if (explicitEndpoint) {
     const endpoint = new URL(explicitEndpoint);
@@ -81,6 +77,10 @@ function canonicalEndpoint(values, service) {
     endpoint.search = "";
     endpoint.hash = "";
     return endpoint.toString().replace(/\/$/, "");
+  }
+  const accountName = values.get("accountname");
+  if (!accountName) {
+    throw new StorageConfigurationError("Storage connection string is missing AccountName");
   }
   const protocol = values.get("defaultendpointsprotocol") ?? "https";
   const suffix = values.get("endpointsuffix") ?? "core.windows.net";

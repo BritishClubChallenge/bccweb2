@@ -93,8 +93,13 @@ needs a separate approved grant. Local/dev/Azurite continues to use
 Production is undeployed; when applied it will receive this same secure-by-default model.
 Staging cutover is a single `terraform apply` through the manual `terraform.yml` workflow
 or a local apply, followed by a redeploy. A brief staging interruption during cutover is
-acceptable. Rollback is `git revert` of the change, one re-apply, and redeployment of the
-prior artifact. Preserve all RBAC and data throughout.
+acceptable.
+
+Rollback has two tiers — a targeted revert that keeps `storage-rbac.tf` and its seven role
+assignments (preferred), or a full `git revert` that removes them and re-creates them on
+the next roll-forward. Neither tier removes data or storage topology. See
+[../README.md](../README.md#staging-storage-cutover-and-rollback) for the full procedure
+and the 403/propagation guidance.
 
 **Precedence note**: `-var-file` values always override `TF_VAR_*`
 environment variables for the same variable name, and a later `-var-file`

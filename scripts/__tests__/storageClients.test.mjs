@@ -11,6 +11,8 @@ import {
   createQueueServiceClient,
   preflightBlobReadAccess,
   preflightQueueReadAccess,
+  queueStorageIdentity,
+  StorageConfigurationError,
 } from "../lib/storageClients.mjs";
 import { loadTestTargetIdentity } from "../lib/loadTestTargetIdentity.mjs";
 
@@ -159,6 +161,48 @@ test("canonical storage identity strips credentials from an explicit endpoint", 
     accountName: "bccdata",
     endpoint: "https://bccdata.blob.core.windows.net",
   });
+});
+
+test("blob storage identity accepts an account-less service SAS without exposing its secret", () => {
+  // Given
+  const connectionString =
+    "BlobEndpoint=https://bccdata.blob.core.windows.net/?sv=2026-01-01&sig=blob-secret#fragment;" +
+    "SharedAccessSignature=sv=2026-01-01&sig=blob-secret;";
+
+  // When
+  const identity = blobStorageIdentity({ connectionString });
+
+  // Then
+  assert.equal(identity.accountName, null);
+  assert.equal(identity.endpoint, "https://bccdata.blob.core.windows.net");
+  assert.doesNotMatch(identity.endpoint, /blob-secret|sig=|sv=/);
+});
+
+test("queue storage identity accepts an account-less service SAS without exposing its secret", () => {
+  // Given
+  const connectionString =
+    "QueueEndpoint=https://bccruntime.queue.core.windows.net/?sv=2026-01-01&sig=queue-secret#fragment;" +
+    "SharedAccessSignature=sv=2026-01-01&sig=queue-secret;";
+
+  // When
+  const identity = queueStorageIdentity({ connectionString });
+
+  // Then
+  assert.equal(identity.accountName, null);
+  assert.equal(identity.endpoint, "https://bccruntime.queue.core.windows.net");
+  assert.doesNotMatch(identity.endpoint, /queue-secret|sig=|sv=/);
+});
+
+test("storage identity still requires AccountName without an explicit endpoint", () => {
+  // Given
+  const connectionString = "SharedAccessSignature=sv=2026-01-01&sig=secret;";
+
+  // When / Then
+  assert.throws(
+    () => blobStorageIdentity({ connectionString }),
+    (error) => error instanceof StorageConfigurationError &&
+      error.message === "Storage connection string is missing AccountName",
+  );
 });
 
 test("target digest is stable across equivalent connection-string and account-name representations", () => {
