@@ -1,18 +1,13 @@
 # SPDX-FileCopyrightText: 2026 British Club Challenge authors
 # SPDX-License-Identifier: MPL-2.0
 locals {
-  storage_app_settings = var.use_identity_storage ? [
+  function_app_settings = [
     { name = "AzureWebJobsStorage__accountName", value = local.storage_account_name_runtime },
     { name = "AzureWebJobsStorage__credential", value = "managedidentity" },
     { name = "AzureWebJobsStorage__clientId", value = azapi_resource.fn_umi.output.properties.clientId },
     { name = "BLOB_STORAGE_ACCOUNT_NAME", value = local.storage_account_name_data },
+    { name = "RUNTIME_STORAGE_ACCOUNT_NAME", value = local.storage_account_name_runtime },
     { name = "STORAGE_UMI_CLIENT_ID", value = azapi_resource.fn_umi.output.properties.clientId },
-    ] : [
-    { name = "AzureWebJobsStorage", value = local.storage_runtime_connection_string },
-    { name = "BLOB_CONNECTION_STRING", value = local.storage_data_connection_string },
-  ]
-
-  function_app_settings = concat(local.storage_app_settings, [
     { name = "FUNCTIONS_NODE_BLOCK_ON_ENTRY_POINT_ERROR", value = "true" },
     { name = "BLOB_CONTAINER_NAME", value = "data" },
     { name = "BLOB_PRIVATE_CONTAINER_NAME", value = "data-private" },
@@ -27,7 +22,7 @@ locals {
     { name = "FAI_VALI_ENABLED", value = "true" },
     { name = "FAI_VALI_BASE_URL", value = "https://vali.fai-civl.org" },
     { name = "FAI_VALI_TIMEOUT_MS", value = "20000" },
-  ])
+  ]
 }
 
 resource "azapi_resource" "fn_umi" {
@@ -90,14 +85,10 @@ resource "azapi_resource" "function_app" {
           storage = {
             type  = "blobContainer"
             value = "${trimsuffix(azapi_resource.storage_runtime.output.properties.primaryEndpoints.blob, "/")}/deploymentpackage"
-            authentication = merge(
-              { type = var.use_identity_storage ? "UserAssignedIdentity" : "StorageAccountConnectionString" },
-              var.use_identity_storage ? {
-                userAssignedIdentityResourceId = azapi_resource.fn_umi.id
-                } : {
-                storageAccountConnectionStringName = "AzureWebJobsStorage"
-              }
-            )
+            authentication = {
+              type                           = "UserAssignedIdentity"
+              userAssignedIdentityResourceId = azapi_resource.fn_umi.id
+            }
           }
         }
         runtime = {

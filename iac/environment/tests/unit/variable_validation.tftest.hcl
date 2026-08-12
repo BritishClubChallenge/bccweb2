@@ -41,6 +41,7 @@ variables {
   stamp_rg_name                = "rg-bccweb-unit"
   tfstate_resource_group_name  = "rg-bccweb-tfstate"
   tfstate_storage_account_name = "stbccwebtfstate"
+  operator_principal_id        = "00000000-0000-0000-0000-000000000006"
   ops_email                    = "ops@example.test"
   puretrack_api_key            = "TEST_PT_KEY_SENTINEL"
   puretrack_email              = "TEST_PT_EMAIL@example.test"

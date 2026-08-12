@@ -120,6 +120,7 @@ variables {
   acs_secret_version            = "1"
   tags                          = { environment = "unit", managed_by = "terraform" }
   app_insights_id               = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/test-rg/providers/Microsoft.Insights/components/test-ai"
+  operator_principal_id         = "00000000-0000-0000-0000-000000000006"
   terraform_principal_object_id = "00000000-0000-0000-0000-000000000005"
 }
 
@@ -187,14 +188,21 @@ run "function_app_settings_use_kv_references" {
 
   assert {
     condition = (
-      one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "AzureWebJobsStorage"]) == "DefaultEndpointsProtocol=https;AccountName=stbccwebunitrt;AccountKey=TEST_STORAGE_KEY_SENTINEL;EndpointSuffix=core.windows.net" &&
-      one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "BLOB_CONNECTION_STRING"]) == "DefaultEndpointsProtocol=https;AccountName=stbccwebunitdata;AccountKey=TEST_STORAGE_KEY_SENTINEL;EndpointSuffix=core.windows.net" &&
-      length(azapi_resource_action.storage_runtime_keys_legacy) == 1 &&
-      length(azapi_resource_action.storage_data_keys_legacy) == 1 &&
+      length([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting if contains(["AzureWebJobsStorage", "BLOB_CONNECTION_STRING"], setting.name)]) == 0 &&
+      !strcontains(jsonencode(azapi_resource.function_app.body.properties.siteConfig.appSettings), "AccountKey=") &&
+      !strcontains(jsonencode(azapi_resource.function_app.body.properties.siteConfig.appSettings), "TEST_STORAGE_KEY_SENTINEL") &&
+      one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "AzureWebJobsStorage__accountName"]) == "stbccwebunitrt" &&
+      one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "AzureWebJobsStorage__credential"]) == "managedidentity" &&
+      one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "AzureWebJobsStorage__clientId"]) == "00000000-0000-0000-0000-000000000001" &&
+      one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "BLOB_STORAGE_ACCOUNT_NAME"]) == "stbccwebunitdata" &&
+      one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "RUNTIME_STORAGE_ACCOUNT_NAME"]) == "stbccwebunitrt" &&
+      one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "STORAGE_UMI_CLIENT_ID"]) == "00000000-0000-0000-0000-000000000001" &&
+      one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "BLOB_CONTAINER_NAME"]) == "data" &&
+      one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "BLOB_PRIVATE_CONTAINER_NAME"]) == "data-private" &&
       length([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting if setting.name == "FUNCTIONS_WORKER_RUNTIME"]) == 0 &&
       one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "FUNCTIONS_NODE_BLOCK_ON_ENTRY_POINT_ERROR"]) == "true"
     )
-    error_message = "Legacy Flex settings must omit the forbidden worker setting, surface entry-point errors, retain distinct connection strings, and use only the gated legacy key actions."
+    error_message = "Function settings must use only exact managed-identity storage settings, retain both container names, and contain no literal connection string or key value."
   }
 }
 
@@ -246,10 +254,11 @@ run "function_app_uses_flex_consumption" {
       azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.type == "blobContainer" &&
       azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.value == "https://runtime-unit.blob.core.windows.net/deploymentpackage" &&
       endswith(azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.value, "/deploymentpackage") &&
-      azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.authentication.type == "StorageAccountConnectionString" &&
-      azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.authentication.storageAccountConnectionStringName == "AzureWebJobsStorage"
+      azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.authentication.type == "UserAssignedIdentity" &&
+      azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.authentication.userAssignedIdentityResourceId == azapi_resource.fn_umi.id &&
+      !can(azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.authentication.storageAccountConnectionStringName)
     )
-    error_message = "Flex deployment storage must use the runtime account blob endpoint and AzureWebJobsStorage connection-string authentication."
+    error_message = "Flex deployment storage must use the runtime account blob endpoint and Function user-assigned identity authentication only."
   }
 
   assert {
@@ -547,7 +556,7 @@ run "storage_names_reject_over_24_characters" {
   ]
 }
 
-run "identity_storage_uses_managed_identity_without_keys" {
+run "storage_identity_and_rbac_are_unconditional" {
   command = plan
 
   providers = {
@@ -559,20 +568,13 @@ run "identity_storage_uses_managed_identity_without_keys" {
     source = "./tests/unit/stamp-fixture"
   }
 
-  variables {
-    use_identity_storage    = true
-    allow_shared_key_access = false
-  }
-
   assert {
     condition = (
-      length(azapi_resource_action.storage_runtime_keys_legacy) == 0 &&
-      length(azapi_resource_action.storage_data_keys_legacy) == 0 &&
       length([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting if contains(["AzureWebJobsStorage", "BLOB_CONNECTION_STRING"], setting.name)]) == 0 &&
-      !strcontains(jsonencode([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting if contains(["AzureWebJobsStorage__accountName", "AzureWebJobsStorage__credential", "AzureWebJobsStorage__clientId", "BLOB_STORAGE_ACCOUNT_NAME", "STORAGE_UMI_CLIENT_ID"], setting.name)]), "AccountKey=") &&
-      !strcontains(jsonencode([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting if contains(["AzureWebJobsStorage__accountName", "AzureWebJobsStorage__credential", "AzureWebJobsStorage__clientId", "BLOB_STORAGE_ACCOUNT_NAME", "STORAGE_UMI_CLIENT_ID"], setting.name)]), "TEST_STORAGE_KEY_SENTINEL")
+      !strcontains(jsonencode(azapi_resource.function_app.body.properties.siteConfig.appSettings), "AccountKey=") &&
+      !strcontains(jsonencode(azapi_resource.function_app.body.properties.siteConfig.appSettings), "TEST_STORAGE_KEY_SENTINEL")
     )
-    error_message = "Identity storage mode must omit both listKeys actions, both literal connection-string settings, and every account-key value."
+    error_message = "The only storage mode must omit literal connection-string settings and every account-key value."
   }
 
   assert {
@@ -581,11 +583,12 @@ run "identity_storage_uses_managed_identity_without_keys" {
       one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "AzureWebJobsStorage__credential"]) == "managedidentity" &&
       one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "AzureWebJobsStorage__clientId"]) == "00000000-0000-0000-0000-000000000001" &&
       one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "BLOB_STORAGE_ACCOUNT_NAME"]) == "stbccwebunitdata" &&
+      one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "RUNTIME_STORAGE_ACCOUNT_NAME"]) == "stbccwebunitrt" &&
       one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "STORAGE_UMI_CLIENT_ID"]) == "00000000-0000-0000-0000-000000000001" &&
       one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "BLOB_CONTAINER_NAME"]) == "data" &&
       one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "BLOB_PRIVATE_CONTAINER_NAME"]) == "data-private"
     )
-    error_message = "Identity storage mode must publish the runtime/data account names and the Function UMI client ID while retaining both container names."
+    error_message = "The Function must publish both account names and the Function UMI client ID while retaining both container names."
   }
 
   assert {
@@ -594,7 +597,7 @@ run "identity_storage_uses_managed_identity_without_keys" {
       azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.authentication.userAssignedIdentityResourceId == azapi_resource.fn_umi.id &&
       !can(azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.authentication.storageAccountConnectionStringName)
     )
-    error_message = "Identity storage mode must authenticate Flex deployment storage with the Function user-assigned identity only."
+    error_message = "Flex deployment storage must authenticate with the Function user-assigned identity only."
   }
 
   assert {
@@ -604,122 +607,60 @@ run "identity_storage_uses_managed_identity_without_keys" {
       azapi_resource.storage_runtime.body.properties.allowSharedKeyAccess == false &&
       azapi_resource.storage_data.body.properties.allowSharedKeyAccess == false
     )
-    error_message = "Identity mode must preserve the two-account topology and apply the disabled Shared Key policy to both accounts."
+    error_message = "The module must preserve the two-account topology and disable Shared Key on both accounts."
   }
 
   assert {
     condition = (
-      length(azapi_resource.fn_runtime_blob_owner_role) == 1 &&
-      azapi_resource.fn_runtime_blob_owner_role[0].type == "Microsoft.Authorization/roleAssignments@2022-04-01" &&
-      azapi_resource.fn_runtime_blob_owner_role[0].parent_id == azapi_resource.storage_runtime.id &&
-      azapi_resource.fn_runtime_blob_owner_role[0].body.properties.roleDefinitionId == "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/b7e6dc6d-f1e8-4753-8033-0f276bb0955b" &&
-      azapi_resource.fn_runtime_blob_owner_role[0].body.properties.principalId == azapi_resource.fn_umi.output.properties.principalId &&
-      azapi_resource.fn_runtime_blob_owner_role[0].body.properties.principalType == "ServicePrincipal" &&
-      length(azapi_resource.fn_runtime_queue_contributor_role) == 1 &&
-      azapi_resource.fn_runtime_queue_contributor_role[0].parent_id == azapi_resource.storage_runtime.id &&
-      azapi_resource.fn_runtime_queue_contributor_role[0].body.properties.roleDefinitionId == "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/974c5e8b-45b9-4653-ba55-5f855dd0fb88" &&
-      azapi_resource.fn_runtime_queue_contributor_role[0].body.properties.principalId == azapi_resource.fn_umi.output.properties.principalId &&
-      azapi_resource.fn_runtime_queue_contributor_role[0].body.properties.principalType == "ServicePrincipal" &&
-      length(azapi_resource.fn_runtime_table_contributor_role) == 1 &&
-      azapi_resource.fn_runtime_table_contributor_role[0].parent_id == azapi_resource.storage_runtime.id &&
-      azapi_resource.fn_runtime_table_contributor_role[0].body.properties.roleDefinitionId == "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3" &&
-      azapi_resource.fn_runtime_table_contributor_role[0].body.properties.principalId == azapi_resource.fn_umi.output.properties.principalId &&
-      azapi_resource.fn_runtime_table_contributor_role[0].body.properties.principalType == "ServicePrincipal" &&
-      length(azapi_resource.fn_data_blob_contributor_role) == 1 &&
-      azapi_resource.fn_data_blob_contributor_role[0].parent_id == azapi_resource.storage_data.id &&
-      azapi_resource.fn_data_blob_contributor_role[0].body.properties.roleDefinitionId == "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe" &&
-      azapi_resource.fn_data_blob_contributor_role[0].body.properties.principalId == azapi_resource.fn_umi.output.properties.principalId &&
-      azapi_resource.fn_data_blob_contributor_role[0].body.properties.principalType == "ServicePrincipal"
+      azapi_resource.fn_runtime_blob_owner_role.type == "Microsoft.Authorization/roleAssignments@2022-04-01" &&
+      azapi_resource.fn_runtime_blob_owner_role.name == random_uuid.fn_runtime_blob_owner.result &&
+      azapi_resource.fn_runtime_blob_owner_role.parent_id == azapi_resource.storage_runtime.id &&
+      azapi_resource.fn_runtime_blob_owner_role.body.properties.roleDefinitionId == "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/b7e6dc6d-f1e8-4753-8033-0f276bb0955b" &&
+      azapi_resource.fn_runtime_blob_owner_role.body.properties.principalId == azapi_resource.fn_umi.output.properties.principalId &&
+      azapi_resource.fn_runtime_blob_owner_role.body.properties.principalType == "ServicePrincipal" &&
+      azapi_resource.fn_runtime_queue_contributor_role.type == "Microsoft.Authorization/roleAssignments@2022-04-01" &&
+      azapi_resource.fn_runtime_queue_contributor_role.name == random_uuid.fn_runtime_queue_contributor.result &&
+      azapi_resource.fn_runtime_queue_contributor_role.parent_id == azapi_resource.storage_runtime.id &&
+      azapi_resource.fn_runtime_queue_contributor_role.body.properties.roleDefinitionId == "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/974c5e8b-45b9-4653-ba55-5f855dd0fb88" &&
+      azapi_resource.fn_runtime_queue_contributor_role.body.properties.principalId == azapi_resource.fn_umi.output.properties.principalId &&
+      azapi_resource.fn_runtime_queue_contributor_role.body.properties.principalType == "ServicePrincipal" &&
+      azapi_resource.fn_runtime_table_contributor_role.type == "Microsoft.Authorization/roleAssignments@2022-04-01" &&
+      azapi_resource.fn_runtime_table_contributor_role.name == random_uuid.fn_runtime_table_contributor.result &&
+      azapi_resource.fn_runtime_table_contributor_role.parent_id == azapi_resource.storage_runtime.id &&
+      azapi_resource.fn_runtime_table_contributor_role.body.properties.roleDefinitionId == "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3" &&
+      azapi_resource.fn_runtime_table_contributor_role.body.properties.principalId == azapi_resource.fn_umi.output.properties.principalId &&
+      azapi_resource.fn_runtime_table_contributor_role.body.properties.principalType == "ServicePrincipal" &&
+      azapi_resource.fn_data_blob_contributor_role.type == "Microsoft.Authorization/roleAssignments@2022-04-01" &&
+      azapi_resource.fn_data_blob_contributor_role.name == random_uuid.fn_data_blob_contributor.result &&
+      azapi_resource.fn_data_blob_contributor_role.parent_id == azapi_resource.storage_data.id &&
+      azapi_resource.fn_data_blob_contributor_role.body.properties.roleDefinitionId == "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe" &&
+      azapi_resource.fn_data_blob_contributor_role.body.properties.principalId == azapi_resource.fn_umi.output.properties.principalId &&
+      azapi_resource.fn_data_blob_contributor_role.body.properties.principalType == "ServicePrincipal"
     )
-    error_message = "Identity mode must grant the Function UMI the exact runtime Blob Owner, Queue Contributor, Table Contributor, and data Blob Contributor roles at account scope."
+    error_message = "The Function UMI must always receive the exact runtime Blob Owner, Queue Contributor, Table Contributor, and data Blob Contributor assignments."
   }
 
   assert {
     condition = (
-      length(azapi_resource.operator_runtime_queue_contributor_role) == 0 &&
-      length(azapi_resource.operator_deployment_blob_contributor_role) == 0 &&
-      length(azapi_resource.operator_data_blob_contributor_role) == 0
+      azapi_resource.operator_runtime_queue_contributor_role.type == "Microsoft.Authorization/roleAssignments@2022-04-01" &&
+      azapi_resource.operator_runtime_queue_contributor_role.name == random_uuid.operator_runtime_queue_contributor.result &&
+      azapi_resource.operator_runtime_queue_contributor_role.parent_id == azapi_resource.storage_runtime.id &&
+      azapi_resource.operator_runtime_queue_contributor_role.body.properties.roleDefinitionId == "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/974c5e8b-45b9-4653-ba55-5f855dd0fb88" &&
+      azapi_resource.operator_runtime_queue_contributor_role.body.properties.principalId == var.operator_principal_id &&
+      azapi_resource.operator_runtime_queue_contributor_role.body.properties.principalType == "ServicePrincipal" &&
+      azapi_resource.operator_deployment_blob_contributor_role.type == "Microsoft.Authorization/roleAssignments@2022-04-01" &&
+      azapi_resource.operator_deployment_blob_contributor_role.name == random_uuid.operator_deployment_blob_contributor.result &&
+      azapi_resource.operator_deployment_blob_contributor_role.parent_id == azapi_resource.storage_container_deploy.id &&
+      azapi_resource.operator_deployment_blob_contributor_role.body.properties.roleDefinitionId == "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe" &&
+      azapi_resource.operator_deployment_blob_contributor_role.body.properties.principalId == var.operator_principal_id &&
+      azapi_resource.operator_deployment_blob_contributor_role.body.properties.principalType == "ServicePrincipal" &&
+      azapi_resource.operator_data_blob_contributor_role.type == "Microsoft.Authorization/roleAssignments@2022-04-01" &&
+      azapi_resource.operator_data_blob_contributor_role.name == random_uuid.operator_data_blob_contributor.result &&
+      azapi_resource.operator_data_blob_contributor_role.parent_id == azapi_resource.storage_data.id &&
+      azapi_resource.operator_data_blob_contributor_role.body.properties.roleDefinitionId == "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe" &&
+      azapi_resource.operator_data_blob_contributor_role.body.properties.principalId == var.operator_principal_id &&
+      azapi_resource.operator_data_blob_contributor_role.body.properties.principalType == "ServicePrincipal"
     )
-    error_message = "The default-empty operator principal must create no operator role assignments."
-  }
-}
-
-run "identity_storage_grants_operator_data_plane_roles" {
-  command = plan
-
-  providers = {
-    azapi  = azapi.mock
-    random = random.mock
-  }
-
-  module {
-    source = "./tests/unit/stamp-fixture"
-  }
-
-  variables {
-    use_identity_storage  = true
-    operator_principal_id = "00000000-0000-0000-0000-000000000006"
-  }
-
-  assert {
-    condition = (
-      length(azapi_resource.operator_runtime_queue_contributor_role) == 1 &&
-      azapi_resource.operator_runtime_queue_contributor_role[0].type == "Microsoft.Authorization/roleAssignments@2022-04-01" &&
-      azapi_resource.operator_runtime_queue_contributor_role[0].parent_id == azapi_resource.storage_runtime.id &&
-      azapi_resource.operator_runtime_queue_contributor_role[0].body.properties.roleDefinitionId == "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/974c5e8b-45b9-4653-ba55-5f855dd0fb88" &&
-      azapi_resource.operator_runtime_queue_contributor_role[0].body.properties.principalId == "00000000-0000-0000-0000-000000000006" &&
-      azapi_resource.operator_runtime_queue_contributor_role[0].body.properties.principalType == "ServicePrincipal" &&
-      length(azapi_resource.operator_deployment_blob_contributor_role) == 1 &&
-      azapi_resource.operator_deployment_blob_contributor_role[0].parent_id == azapi_resource.storage_container_deploy.id &&
-      azapi_resource.operator_deployment_blob_contributor_role[0].body.properties.roleDefinitionId == "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe" &&
-      azapi_resource.operator_deployment_blob_contributor_role[0].body.properties.principalId == "00000000-0000-0000-0000-000000000006" &&
-      azapi_resource.operator_deployment_blob_contributor_role[0].body.properties.principalType == "ServicePrincipal" &&
-      length(azapi_resource.operator_data_blob_contributor_role) == 1 &&
-      azapi_resource.operator_data_blob_contributor_role[0].parent_id == azapi_resource.storage_data.id &&
-      azapi_resource.operator_data_blob_contributor_role[0].body.properties.roleDefinitionId == "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe" &&
-      azapi_resource.operator_data_blob_contributor_role[0].body.properties.principalId == "00000000-0000-0000-0000-000000000006" &&
-      azapi_resource.operator_data_blob_contributor_role[0].body.properties.principalType == "ServicePrincipal"
-    )
-    error_message = "A non-empty operator principal must receive only the exact runtime Queue Contributor, deployment-container Blob Contributor, and data-account Blob Contributor roles."
-  }
-}
-
-run "legacy_storage_defaults_remain_key_based" {
-  command = plan
-
-  providers = {
-    azapi  = azapi.mock
-    random = random.mock
-  }
-
-  module {
-    source = "./tests/unit/stamp-fixture"
-  }
-
-  assert {
-    condition = (
-      azapi_resource.storage_runtime.body.properties.allowSharedKeyAccess == true &&
-      azapi_resource.storage_data.body.properties.allowSharedKeyAccess == true &&
-      length(azapi_resource_action.storage_runtime_keys_legacy) == 1 &&
-      length(azapi_resource_action.storage_data_keys_legacy) == 1 &&
-      one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "AzureWebJobsStorage"]) == "DefaultEndpointsProtocol=https;AccountName=stbccwebunitrt;AccountKey=TEST_STORAGE_KEY_SENTINEL;EndpointSuffix=core.windows.net" &&
-      one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "BLOB_CONNECTION_STRING"]) == "DefaultEndpointsProtocol=https;AccountName=stbccwebunitdata;AccountKey=TEST_STORAGE_KEY_SENTINEL;EndpointSuffix=core.windows.net" &&
-      azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.authentication.type == "StorageAccountConnectionString" &&
-      azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.authentication.storageAccountConnectionStringName == "AzureWebJobsStorage"
-    )
-    error_message = "Default legacy mode must retain Shared Key access, both gated listKeys actions and connection strings, and Flex connection-string deployment authentication."
-  }
-
-  assert {
-    condition = (
-      length(azapi_resource.fn_runtime_blob_owner_role) == 0 &&
-      length(azapi_resource.fn_runtime_queue_contributor_role) == 0 &&
-      length(azapi_resource.fn_runtime_table_contributor_role) == 0 &&
-      length(azapi_resource.fn_data_blob_contributor_role) == 0 &&
-      length(azapi_resource.operator_runtime_queue_contributor_role) == 0 &&
-      length(azapi_resource.operator_deployment_blob_contributor_role) == 0 &&
-      length(azapi_resource.operator_data_blob_contributor_role) == 0
-    )
-    error_message = "Default legacy mode must plan no new storage data-plane role assignments."
+    error_message = "The required operator principal must always receive runtime Queue Contributor, deployment-container Blob Contributor, and data-account Blob Contributor."
   }
 }

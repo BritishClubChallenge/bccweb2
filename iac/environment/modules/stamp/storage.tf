@@ -27,7 +27,7 @@ resource "azapi_resource" "storage_runtime" {
     }
     properties = {
       allowBlobPublicAccess    = false
-      allowSharedKeyAccess     = var.allow_shared_key_access
+      allowSharedKeyAccess     = false
       supportsHttpsTrafficOnly = true
       minimumTlsVersion        = "TLS1_2"
     }
@@ -165,9 +165,6 @@ resource "azapi_resource" "queue_puretrack_group_poison" {
 
 # ─── Data Storage Account ────────────────────────────────────────────────────
 #
-# BLOB_CONNECTION_STRING targets this account. It owns both application blob
-# containers because the API accesses them through one BlobServiceClient.
-
 resource "azapi_resource" "storage_data" {
   type      = "Microsoft.Storage/storageAccounts@2025-06-01"
   name      = local.storage_account_name_data
@@ -182,7 +179,7 @@ resource "azapi_resource" "storage_data" {
     }
     properties = {
       allowBlobPublicAccess    = true
-      allowSharedKeyAccess     = var.allow_shared_key_access
+      allowSharedKeyAccess     = false
       supportsHttpsTrafficOnly = true
       minimumTlsVersion        = "TLS1_2"
     }
@@ -278,8 +275,6 @@ resource "azapi_resource" "storage_container_data_private" {
   depends_on = [azapi_update_resource.blob_service_data]
 }
 
-# ─── Legacy Per-Account Keys ─────────────────────────────────────────────────
-
 removed {
   from = azapi_resource_action.storage_runtime_keys
 
@@ -294,33 +289,6 @@ removed {
   lifecycle {
     destroy = false
   }
-}
-
-resource "azapi_resource_action" "storage_runtime_keys_legacy" {
-  count = var.use_identity_storage ? 0 : 1
-
-  type        = "Microsoft.Storage/storageAccounts@2025-06-01"
-  resource_id = azapi_resource.storage_runtime.id
-  action      = "listKeys"
-  method      = "POST"
-
-  response_export_values = ["keys"]
-}
-
-resource "azapi_resource_action" "storage_data_keys_legacy" {
-  count = var.use_identity_storage ? 0 : 1
-
-  type        = "Microsoft.Storage/storageAccounts@2025-06-01"
-  resource_id = azapi_resource.storage_data.id
-  action      = "listKeys"
-  method      = "POST"
-
-  response_export_values = ["keys"]
-}
-
-locals {
-  storage_runtime_connection_string = var.use_identity_storage ? null : "DefaultEndpointsProtocol=https;AccountName=${local.storage_account_name_runtime};AccountKey=${azapi_resource_action.storage_runtime_keys_legacy[0].output.keys[0].value};EndpointSuffix=core.windows.net"
-  storage_data_connection_string    = var.use_identity_storage ? null : "DefaultEndpointsProtocol=https;AccountName=${local.storage_account_name_data};AccountKey=${azapi_resource_action.storage_data_keys_legacy[0].output.keys[0].value};EndpointSuffix=core.windows.net"
 }
 
 # ─── Blob Lifecycle Management Policy ────────────────────────────────────────
