@@ -4,6 +4,20 @@ Use this runbook for an operator-owned, dedicated load-test stack. The suite mea
 round-blob contention without client replay and proves exact Sign-to-Fly persistence
 before destructive cleanup. Never target production or a shared queue.
 
+## Storage identity baseline
+
+Azure environment stamps unconditionally use the Function UMI as their workload identity
+and disable Shared Key on both storage accounts; there are no identity or Shared Key toggle
+variables. The required per-environment `operator_principal_id` identifies that environment's
+GitHub OIDC UMI for remote operator access. Local Azurite remains connection-string based.
+Production is not deployed and must not be described as already keyless; it receives this
+secure-by-default model when first applied.
+
+Cut staging over with one `environment/staging` apply through the manual `terraform.yml`
+workflow (or locally), then redeploy the application; a brief interruption is acceptable.
+Rollback is `git revert`, re-apply, and redeploy the prior artifact. This is the complete
+recovery procedure.
+
 ## Preconditions
 
 1. Install k6 and start a worker-owned local stack or dedicated Azure test stack.
@@ -73,7 +87,7 @@ default (`127.0.0.1:10001`) when `AzureWebJobsStorage` is not exported in the sh
 Remote targets must provide `AzureWebJobsStorage` or `RUNTIME_STORAGE_ACCOUNT_NAME`;
 `BLOB_CONNECTION_STRING` remains blob-only and is never used for queue verification.
 For remote staging, use account names with the invoking Entra identity, not remote storage
-keys or the Function UMI. Persistent operator blob/queue roles belong to the staging OIDC
+keys or the Function UMI. Persistent operator blob/queue roles belong to the environment OIDC
 UMI; a local human needs a separately approved grant. Local Azurite remains explicit:
 `BLOB_CONNECTION_STRING="UseDevelopmentStorage=true"` and
 `AzureWebJobsStorage="UseDevelopmentStorage=true"`.

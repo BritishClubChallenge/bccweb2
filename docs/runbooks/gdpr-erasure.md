@@ -6,6 +6,19 @@ registered in the BCC system.
 Data controller: Matt White (project owner).
 This runbook must not be executed without explicit written authorisation.
 
+## Storage Identity Baseline
+
+Azure environment stamps unconditionally use the Function UMI as their workload identity
+and disable Shared Key on both storage accounts; there are no identity or Shared Key toggle
+variables. The required per-environment `operator_principal_id` identifies that environment's
+GitHub OIDC UMI for approved operator access. Local Azurite remains connection-string based.
+Production is not deployed; it becomes secure by default when first applied.
+
+For staging, make the cutover with one `environment/staging` apply through the manual
+`terraform.yml` workflow (or locally), then redeploy the application. A brief staging
+interruption is acceptable. Rollback means `git revert`, re-apply, and redeploy the prior
+artifact. This is the complete recovery procedure.
+
 ## When to Run
 
 Execute this procedure when:
@@ -77,7 +90,7 @@ export GDPR_ANONYMIZE_CONFIRM=YES
 node scripts/admin/anonymize-pilot.mjs --pilotId <uuid> --confirm
 ```
 
-Persistent operator storage roles belong to the staging OIDC UMI. A local human running
+Persistent operator storage roles belong to the environment OIDC UMI. A local human running
 this procedure needs a separately approved data-plane grant. For authorised local
 Azurite rehearsal, omit the account name and use
 `BLOB_CONNECTION_STRING="UseDevelopmentStorage=true"`; never substitute a remote account

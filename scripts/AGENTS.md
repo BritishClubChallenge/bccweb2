@@ -37,10 +37,18 @@ Root-package operator scripts use `lib/storageClients.mjs`. Local/Azurite execut
 authenticated as the invoking operator/OIDC identity through `DefaultAzureCredential`.
 Do not bind these scripts to the Function App managed identity or set
 `STORAGE_UMI_CLIENT_ID` for them: that setting belongs to the API adapter. Persistent
-remote data/queue/deployment-package roles belong to the staging GitHub OIDC UMI; a local
-human using `az login` needs a separately approved grant. Production has not adopted this
-staging identity contract. `init-storage.mjs` remains an Azurite-only Shared Key REST
-bootstrap and deliberately does not use the adapter.
+remote data/queue/deployment-package roles belong to each environment's GitHub OIDC UMI,
+whose object ID is the stamp's required `operator_principal_id`; a local human using
+`az login` needs a separately approved grant. The Function UMI remains the workload
+identity. Azure stamps unconditionally use managed identity with Shared Key disabled on
+both accounts, with no identity or Shared Key toggles. Production is not deployed, but it
+will receive this secure-by-default contract when applied. `init-storage.mjs` remains an
+Azurite-only Shared Key REST bootstrap and deliberately does not use the adapter.
+
+For the staging cutover, run one `environment/staging` apply through the manual
+`terraform.yml` workflow (or locally), then redeploy through the existing staging deploy
+path; a brief interruption is expected. Roll back with `git revert`, re-apply, and redeploy
+the prior artifact. This is the complete operator procedure.
 
 ## `privacy-scan.mjs` — CI success gate
 

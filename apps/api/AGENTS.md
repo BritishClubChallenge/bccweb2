@@ -47,9 +47,9 @@ Bespoke HS256 JWT (`JWT_SECRET` env, ≥32 chars). Access token 1h, refresh 30d.
 
 ## Env
 
-Storage has two explicit modes. Local/dev/Azurite uses `AzureWebJobsStorage` and
+Storage has a dual-mode application seam. Local/dev/Azurite uses `AzureWebJobsStorage` and
 `BLOB_CONNECTION_STRING` from [local.settings.example.json](local.settings.example.json).
-Azure identity mode gives the Functions host `AzureWebJobsStorage__accountName`,
+Deployed Azure is secure-by-default and gives the Functions host `AzureWebJobsStorage__accountName`,
 `AzureWebJobsStorage__credential=managedidentity`, and `AzureWebJobsStorage__clientId`;
 the API SDK seam uses `RUNTIME_STORAGE_ACCOUNT_NAME`, `BLOB_STORAGE_ACCOUNT_NAME`, and
 `STORAGE_UMI_CLIENT_ID`. The Function UMI authenticates deployed host, queue, and data

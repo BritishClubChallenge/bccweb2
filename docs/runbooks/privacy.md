@@ -37,6 +37,20 @@ Current fields:
 | `wingClass` | Equipment |
 | `wingColours` | Equipment |
 
+## Storage Identity Baseline
+
+Azure environment stamps are secure by default: the Function UMI is the workload identity,
+Shared Key is disabled on both storage accounts unconditionally, and there are no identity
+or Shared Key toggle variables. Each stamp requires `operator_principal_id`, the object ID
+of that environment's GitHub OIDC UMI, for approved remote operator access. Local Azurite
+continues to use connection strings. Production remains undeployed; it receives this model
+when first applied rather than being treated as already keyless.
+
+The staging cutover is one `environment/staging` apply through the manual `terraform.yml`
+workflow (or a local apply) followed by an application redeploy; a brief interruption is
+acceptable. Roll back with `git revert`, re-apply, and redeploy the prior artifact—never by
+changing storage authentication modes manually.
+
 ## Exception Process
 
 Any whitelist exception (a PII field permitted in a specific public location)
@@ -69,7 +83,7 @@ node scripts/init-storage.mjs
 BLOB_CONNECTION_STRING="UseDevelopmentStorage=true" node scripts/privacy-scan.mjs
 
 # Scan remote staging with the invoking Entra identity (separate approved grant required
-# for a local human; persistent operator roles belong to the staging OIDC UMI):
+# for a local human; persistent operator roles belong to the environment OIDC UMI):
 az login
 BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata" node scripts/privacy-scan.mjs
 
@@ -126,7 +140,7 @@ round reference set immediately before deletion.
 For remote staging, authenticate with `az login` and export
 `BLOB_STORAGE_ACCOUNT_NAME=stbccwebstagingdata` before either dry run or delete. Do not
 use a remote storage connection string or the Function App UMI. Persistent operator
-roles belong to the staging OIDC UMI; a local human needs a separately approved grant.
+roles belong to the environment OIDC UMI; a local human needs a separately approved grant.
 For local Azurite, retain
 `BLOB_CONNECTION_STRING="UseDevelopmentStorage=true"`.
 

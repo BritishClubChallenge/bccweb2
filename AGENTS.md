@@ -159,21 +159,24 @@ All producers/triggers use the `AzureWebJobsStorage` connection only; never
 **Two storage accounts per env**: Account A `stbccweb<env>rt` is the runtime plane —
 Functions host storage, all ten queues, and the Flex Consumption `deploymentpackage`
 container. Account B `stbccweb<env>data` is the application blob plane — the `data`/
-`data-private` containers only. `apps/api/src/lib/storageClients.ts` is the API's sole
-dual-mode SDK-construction seam: local/dev/Azurite keeps `AzureWebJobsStorage` and
-`BLOB_CONNECTION_STRING`; Azure identity mode uses `RUNTIME_STORAGE_ACCOUNT_NAME`/
+`data-private` containers only. The stamp is secure by default and unconditionally uses
+managed identity with Shared Key disabled on both accounts; there are no storage-identity
+or Shared Key toggle variables. `apps/api/src/lib/storageClients.ts` is the API's sole
+SDK-construction seam: local/dev/Azurite keeps `AzureWebJobsStorage` and
+`BLOB_CONNECTION_STRING`, while deployed Azure uses `RUNTIME_STORAGE_ACCOUNT_NAME`/
 `BLOB_STORAGE_ACCOUNT_NAME` plus `STORAGE_UMI_CLIENT_ID`. The Functions host itself uses
 `AzureWebJobsStorage__accountName`, `AzureWebJobsStorage__credential=managedidentity`, and
 `AzureWebJobsStorage__clientId`. See
 [docs/architecture/storage-and-queues.md](docs/architecture/storage-and-queues.md) for
 the full split.
 
-The Function UMI is the deployed workload identity for host/data access. It is distinct
-from the staging GitHub OIDC/Terraform UMI used by remote operator scripts and deployment
-automation; never configure scripts to impersonate the Function UMI. Persistent operator
-storage roles belong only to that staging OIDC UMI. Local humans use `az login` only after
-a separately approved data-plane grant. Identity rollout is staging-only; production is
-not deployed or keyless, and local Azurite remains connection-string based.
+The Function UMI is the deployed workload identity for host/data access. The required
+per-environment `operator_principal_id` is the object ID of that environment's GitHub
+OIDC/Terraform UMI, used by remote operator scripts and deployment automation; it is not
+the Function UMI client ID, and scripts must never impersonate the Function UMI. Local
+humans use `az login` only after a separately approved data-plane grant. Production is
+not deployed; when it is applied it receives this same secure-by-default identity model.
+Local Azurite remains connection-string based.
 
 Full container/family/flow reference (containers, all ten queues, brief PDF/sign
 reflect/rescore/PureTrack/IGC-validation flows, CAS/attempt semantics, poison
@@ -276,6 +279,13 @@ secret mappings in `terraform-run.yml` for operator secrets (`ops_email`, `puret
 `iac/env/shared.generated.tfvars`; environment plans never load it. There are no GitHub
 Terraform-input variables. Terraform-native `validation` blocks replace the shell required-vars
 pre-check that `terraform-run.yml` used to run. Secrets flow only through the workflow job environment.
+
+The staging storage cutover is deliberately simple: run one `environment/staging` apply
+through the manual `terraform.yml` workflow (or the equivalent local apply), then redeploy
+the application through the existing `deploy-staging.yml` → `deploy-app.yml` path. A brief
+staging interruption between apply and redeploy is acceptable and expected. Rollback is a
+`git revert` of the secure-storage change, followed by one re-apply and redeployment of the
+prior artifact. This is the complete cutover and rollback procedure.
 
 CI (`.github/workflows/`) is DRY: three composite actions (`.github/actions/{setup-node-mise,
 azurite,tf-setup}`) plus two reusable workflows (`deploy-app.yml`, `terraform-run.yml`) that the

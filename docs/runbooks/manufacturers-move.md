@@ -12,6 +12,20 @@ that includes the manufacturers API changes. The deploy switches the API to writ
 `manufacturers.json` to the public container going forward; this script performs the
 one-time promotion of the existing private copy.
 
+## Storage identity baseline
+
+Azure environment stamps unconditionally use the Function UMI as their workload identity
+with Shared Key disabled on both storage accounts; no identity or Shared Key toggle
+variables exist. The required per-environment `operator_principal_id` is the object ID of
+that environment's GitHub OIDC UMI for remote operator access. Local Azurite remains
+connection-string based. Production is not deployed and becomes secure by default only
+when first applied.
+
+The staging cutover is one `environment/staging` apply through the manual `terraform.yml`
+workflow (or locally) followed by an application redeploy; a brief interruption is
+acceptable. Roll back by `git revert`, re-applying, and redeploying the prior artifact,
+without manually changing the storage authentication model.
+
 ## Script
 
 Remote staging uses the invoking Entra identity, not a storage key or the Function UMI:
@@ -22,7 +36,7 @@ BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata" \
   node scripts/admin/move-manufacturers-to-public.mjs
 ```
 
-Persistent operator storage roles belong to the staging OIDC UMI. A local human needs a
+Persistent operator storage roles belong to the environment OIDC UMI. A local human needs a
 separately approved data-plane grant. For local Azurite, retain the explicit emulator
 path:
 

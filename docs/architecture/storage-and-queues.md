@@ -42,12 +42,13 @@ accounts per environment** behind a dual-mode storage adapter:
   LRS/GRS replication, public blob access enabled (for `data`), and a prod-only
   `CanNotDelete` lock.
 
-### Identity-based access (staging)
+### Secure-by-default identity access
 
-The managed-identity contract is enabled/applied only for staging; production has not
-been deployed with it and is not keyless. The runtime and data accounts remain distinct:
-Functions host state, queues, and `deploymentpackage` use the runtime account, while
-public/private application blobs use the data account.
+Every environment stamp is unconditionally identity-based: Shared Key is disabled on
+both the runtime and data accounts, and there are no storage-identity or Shared Key toggle
+variables. The runtime and data accounts remain distinct: Functions host state, queues,
+and `deploymentpackage` use the runtime account, while public/private application blobs
+use the data account.
 
 The Function App's UMI is the workload identity for host storage, Flex deployment,
 runtime queues/tables, and data blobs (staging client ID
@@ -55,13 +56,29 @@ runtime queues/tables, and data blobs (staging client ID
 `AzureWebJobsStorage__accountName`, `AzureWebJobsStorage__credential=managedidentity`,
 and `AzureWebJobsStorage__clientId`; the API adapter uses
 `RUNTIME_STORAGE_ACCOUNT_NAME`, `BLOB_STORAGE_ACCOUNT_NAME`, and
-`STORAGE_UMI_CLIENT_ID`. A separate staging GitHub OIDC/Terraform UMI (principal ID
-`4eabcaaf-5340-41b7-9ed2-7b47ebeaa7cd`) authenticates
-deployment and remote operator scripts and receives only its queue, data-blob, and
-`deploymentpackage` grants; it must not be confused with the Function UMI.
+`STORAGE_UMI_CLIENT_ID`. The required `operator_principal_id` for each environment is the
+object ID of that environment's GitHub OIDC/Terraform UMI. In staging this is
+`4eabcaaf-5340-41b7-9ed2-7b47ebeaa7cd`; it authenticates deployment and remote operator
+scripts and receives only its queue, data-blob, and `deploymentpackage` grants. It must
+not be confused with the Function UMI client ID.
 
 Local development, Docker, tests, and Azurite are the deliberate exception: they retain
 `AzureWebJobsStorage` and `BLOB_CONNECTION_STRING` and do not require Azure identities.
+Production is not deployed and must not be described as already keyless; its first apply
+will create the same secure-by-default identity configuration.
+
+### Staging cutover and rollback
+
+Cut staging over with one `environment/staging` `terraform apply`, using the manual
+`.github/workflows/terraform.yml` workflow or the equivalent local command, then redeploy
+through the existing `deploy-staging.yml` → `deploy-app.yml` path. A brief staging
+interruption between the infrastructure apply and application redeploy is acceptable and
+expected. Afterward, dispatch `staging-storage-operator-smoke.yml` to run the non-mutating
+queue verifier and dedicated blob/queue canaries.
+
+Rollback is source-driven: `git revert` the secure-storage change, re-apply the reverted
+environment configuration, and redeploy the prior artifact. There are no storage-auth
+toggle variables or alternate transitional procedures.
 
 ## Schema layer
 

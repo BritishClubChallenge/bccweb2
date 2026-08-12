@@ -28,7 +28,7 @@ don't re-read the source.
 ## blob.ts — clients + leases
 
 - `storageClients.ts` is the only application SDK-construction/authentication seam:
-  `BLOB_CONNECTION_STRING` preserves local/Azurite behavior; otherwise the data-account
+  `BLOB_CONNECTION_STRING` preserves local/Azurite behavior; deployed Azure uses the data-account
   pair `BLOB_STORAGE_ACCOUNT_NAME` + `STORAGE_UMI_CLIENT_ID` selects the Function UMI.
   This workload identity is distinct from the staging OIDC operator identity used by
   scripts and deployment automation. Direct container helpers call

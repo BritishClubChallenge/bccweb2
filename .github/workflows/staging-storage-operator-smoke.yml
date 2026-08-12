@@ -3,11 +3,7 @@
 name: Staging storage operator smoke
 
 on:
-  workflow_call: {}
   workflow_dispatch: {}
-  push:
-    # TEMPORARY: remove this feature-branch trigger in Todo 10.
-    branches: [feat/staging-storage-managed-identity]
 
 jobs:
   operator-smoke:
