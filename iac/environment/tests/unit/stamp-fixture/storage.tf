@@ -20,10 +20,6 @@ resource "azapi_resource" "storage_runtime" {
   location  = var.location
   tags      = var.tags
 
-  # Azure omits allowSharedKeyAccess from GET until it is explicitly set, so
-  # AzAPI's permissive default would silently discard the configured false.
-  ignore_missing_property = false
-
   body = {
     kind = "StorageV2"
     sku = {
@@ -47,8 +43,10 @@ resource "azapi_resource" "storage_runtime" {
   }
 }
 
-# Azure omits allowSharedKeyAccess from GET until it is explicitly set, so the
-# parent body alone can be silently ignored; this update forces the first PUT.
+# Live staging proved the parent body's allowSharedKeyAccess=false was not
+# written: ARM readback stayed unset and key auth succeeded after apply. This
+# explicit update performs the verified write; do not remove it as redundant.
+# Verify post-apply via ARM readback and rejected key auth, never config alone.
 resource "azapi_update_resource" "storage_runtime_shared_key" {
   type        = "Microsoft.Storage/storageAccounts@2025-06-01"
   resource_id = azapi_resource.storage_runtime.id
@@ -199,10 +197,6 @@ resource "azapi_resource" "storage_data" {
   location  = var.location
   tags      = var.tags
 
-  # Azure omits allowSharedKeyAccess from GET until it is explicitly set, so
-  # AzAPI's permissive default would silently discard the configured false.
-  ignore_missing_property = false
-
   body = {
     kind = "StorageV2"
     sku = {
@@ -226,8 +220,10 @@ resource "azapi_resource" "storage_data" {
   }
 }
 
-# Azure omits allowSharedKeyAccess from GET until it is explicitly set, so the
-# parent body alone can be silently ignored; this update forces the first PUT.
+# Live staging proved the parent body's allowSharedKeyAccess=false was not
+# written: ARM readback stayed unset and key auth succeeded after apply. This
+# explicit update performs the verified write; do not remove it as redundant.
+# Verify post-apply via ARM readback and rejected key auth, never config alone.
 resource "azapi_update_resource" "storage_data_shared_key" {
   type        = "Microsoft.Storage/storageAccounts@2025-06-01"
   resource_id = azapi_resource.storage_data.id
