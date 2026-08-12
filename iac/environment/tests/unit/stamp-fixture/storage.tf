@@ -20,6 +20,10 @@ resource "azapi_resource" "storage_runtime" {
   location  = var.location
   tags      = var.tags
 
+  # Azure omits allowSharedKeyAccess from GET until it is explicitly set, so
+  # AzAPI's permissive default would silently discard the configured false.
+  ignore_missing_property = false
+
   body = {
     kind = "StorageV2"
     sku = {
@@ -171,6 +175,10 @@ resource "azapi_resource" "storage_data" {
   parent_id = local.stamp_rg_id
   location  = var.location
   tags      = var.tags
+
+  # Azure omits allowSharedKeyAccess from GET until it is explicitly set, so
+  # AzAPI's permissive default would silently discard the configured false.
+  ignore_missing_property = false
 
   body = {
     kind = "StorageV2"

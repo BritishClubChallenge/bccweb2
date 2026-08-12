@@ -612,6 +612,14 @@ run "storage_identity_and_rbac_are_unconditional" {
 
   assert {
     condition = (
+      azapi_resource.storage_runtime.ignore_missing_property == false &&
+      azapi_resource.storage_data.ignore_missing_property == false
+    )
+    error_message = "Both storage accounts must reject AzAPI's permissive missing-property default so Shared Key disablement cannot be silently ignored."
+  }
+
+  assert {
+    condition = (
       azapi_resource.fn_runtime_blob_owner_role.type == "Microsoft.Authorization/roleAssignments@2022-04-01" &&
       azapi_resource.fn_runtime_blob_owner_role.name == random_uuid.fn_runtime_blob_owner.result &&
       azapi_resource.fn_runtime_blob_owner_role.parent_id == azapi_resource.storage_runtime.id &&
