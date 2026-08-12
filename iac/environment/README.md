@@ -95,9 +95,10 @@ Staging cutover is a single `terraform apply` through the manual `terraform.yml`
 or a local apply, followed by a redeploy. A brief staging interruption during cutover is
 acceptable.
 
-Rollback has two tiers — a targeted revert that keeps `storage-rbac.tf` and its seven role
-assignments (preferred), or a full `git revert` that removes them and re-creates them on
-the next roll-forward. Neither tier removes data or storage topology. See
+Rollback is a `git revert` of the secure-storage change, one re-apply, and a redeploy of
+the prior artifact. `storage-rbac.tf` was added by this change, so the revert removes it
+and destroys all seven role assignments; rolling forward again re-creates them, subject to
+Azure RBAC propagation delay. No data or storage topology is removed. See
 [../README.md](../README.md#staging-storage-cutover-and-rollback) for the full procedure
 and the 403/propagation guidance.
 
