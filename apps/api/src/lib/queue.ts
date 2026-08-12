@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
-import { QueueClient } from "@azure/storage-queue";
+import type { QueueClient } from "@azure/storage-queue";
 import * as z from "zod/v4";
+import {
+  getRuntimeQueueClient,
+  resetStorageClientSingletons,
+} from "./storageClients.js";
 
 // ─── Brief-PDF job contract ───────────────────────────────────────────────────
 
@@ -65,29 +69,15 @@ const _clients = new Map<string, QueueClient>();
 // wired into __tests__/helpers/setup.ts so each test file starts clean.
 export function resetQueueSingletons(): void {
   _clients.clear();
+  resetStorageClientSingletons();
 }
 
 function getQueueClient(queueName: string): QueueClient {
   const cached = _clients.get(queueName);
   if (cached) return cached;
-  // AzureWebJobsStorage is the ONLY setting carrying a QueueEndpoint in
-  // local/docker, and it equals the queue trigger's `connection`, so producer
-  // and trigger can never diverge. Do NOT fall back to BLOB_CONNECTION_STRING
-  // (blob-only) — that would silently break queueing.
-  const connectionString = queueConnectionString();
-  const queueClient = new QueueClient(connectionString, queueName);
+  const queueClient = getRuntimeQueueClient(queueName);
   _clients.set(queueName, queueClient);
   return queueClient;
-}
-
-export function queueConnectionString(): string {
-  const connectionString = process.env["AzureWebJobsStorage"];
-  if (!connectionString) {
-    throw new Error(
-      "AzureWebJobsStorage environment variable is not set (required to enqueue storage-queue jobs)",
-    );
-  }
-  return connectionString;
 }
 
 // ─── Producer ─────────────────────────────────────────────────────────────────

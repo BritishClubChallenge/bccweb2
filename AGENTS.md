@@ -93,8 +93,9 @@ cleans an owned checkpoint; verifier/queue failure preserves all state and forbi
 cleanup. See `docs/runbooks/load-testing.md`.
 
 Host-side local verification uses the queue-capable Azurite connection on `127.0.0.1:10001`
-when `AzureWebJobsStorage` is absent. Remote targets still require that setting explicitly;
-the verifier never falls back to blob-only `BLOB_CONNECTION_STRING`.
+when `AzureWebJobsStorage` is absent. Remote targets require either that connection string
+or `RUNTIME_STORAGE_ACCOUNT_NAME`; the verifier never falls back to blob-only
+`BLOB_CONNECTION_STRING`.
 
 Local `make seed` bootstraps `admin@bcc.local` and writes its generated credential only
 to the ignored root `.dev-credentials` at mode 0600; the value is never logged.
@@ -149,20 +150,37 @@ container.
 rescore, PureTrack group, IGC signature/date validation — each a main queue plus a
 `-poison` dead-letter. Rescore normally records failures on its job-status blob; its
 poison queue remains a host-failure safety net rather than an HTTP-visible retry path.
-All producers/triggers use the `AzureWebJobsStorage` connection only; never
-`BLOB_CONNECTION_STRING`. Queue job schemas (`BriefPdfJobSchema`,
+Locally, producers and triggers both use the `AzureWebJobsStorage` connection string. In
+deployed Azure, producers use `RUNTIME_STORAGE_ACCOUNT_NAME` plus `STORAGE_UMI_CLIENT_ID`
+(via `storageClients.ts`) while the host's triggers use the hierarchical
+`AzureWebJobsStorage__accountName`/`__credential`/`__clientId` settings. Never use
+`BLOB_CONNECTION_STRING`, which is blob-only and would silently break queueing. Queue job
+schemas (`BriefPdfJobSchema`,
 `SignToFlyReflectJobSchema`, `PureTrackGroupJobSchema`, `RescoreJobMessageSchema`,
 `IgcValidationJobSchema`) are all `.strict()` so PII can never enter a queue message —
 `privacy-scan.mjs` does not cover queues, so these schemas are the compensating control.
 
-**Two storage accounts per env** (infra-only split; no app-code change — the API still
-uses one shared `BlobServiceClient` per connection string, so `data`/`data-private`
-still can't be split across accounts): Account A `stbccweb<env>rt` backs
-`AzureWebJobsStorage` — runtime host storage, all ten queues, and the Flex Consumption
-`deploymentpackage` container; Account B `stbccweb<env>data` backs
-`BLOB_CONNECTION_STRING` — the `data`/`data-private` containers only. See
+**Two storage accounts per env**: Account A `stbccweb<env>rt` is the runtime plane —
+Functions host storage, all ten queues, and the Flex Consumption `deploymentpackage`
+container. Account B `stbccweb<env>data` is the application blob plane — the `data`/
+`data-private` containers only. The stamp is secure by default and unconditionally uses
+managed identity with Shared Key disabled on both accounts; there are no storage-identity
+or Shared Key toggle variables. `apps/api/src/lib/storageClients.ts` is the API's sole
+SDK-construction seam: local/dev/Azurite keeps `AzureWebJobsStorage` and
+`BLOB_CONNECTION_STRING`, while deployed Azure uses `RUNTIME_STORAGE_ACCOUNT_NAME`/
+`BLOB_STORAGE_ACCOUNT_NAME` plus `STORAGE_UMI_CLIENT_ID`. The Functions host itself uses
+`AzureWebJobsStorage__accountName`, `AzureWebJobsStorage__credential=managedidentity`, and
+`AzureWebJobsStorage__clientId`. See
 [docs/architecture/storage-and-queues.md](docs/architecture/storage-and-queues.md) for
 the full split.
+
+The Function UMI is the deployed workload identity for host/data access. The required
+per-environment `operator_principal_id` is the object ID of that environment's GitHub
+OIDC/Terraform UMI, used by remote operator scripts and deployment automation; it is not
+the Function UMI client ID, and scripts must never impersonate the Function UMI. Local
+humans use `az login` only after a separately approved data-plane grant. Production is
+not deployed; when it is applied it receives this same secure-by-default identity model.
+Local Azurite remains connection-string based.
 
 Full container/family/flow reference (containers, all ten queues, brief PDF/sign
 reflect/rescore/PureTrack/IGC-validation flows, CAS/attempt semantics, poison
@@ -195,7 +213,10 @@ test-isolation gotchas: [apps/api/AGENTS.md](apps/api/AGENTS.md). Handler conven
 `RoundsCoord` users have a `clubId` scoping their writes.
 
 **Env** ([local.settings.example.json](apps/api/local.settings.example.json)):
-`AzureWebJobsStorage`, `BLOB_CONNECTION_STRING`, `BLOB_CONTAINER_NAME` (`data`),
+local/dev uses `AzureWebJobsStorage` and `BLOB_CONNECTION_STRING`; Azure identity mode uses
+`AzureWebJobsStorage__accountName`/`__credential`/`__clientId`,
+`RUNTIME_STORAGE_ACCOUNT_NAME`, `BLOB_STORAGE_ACCOUNT_NAME`, and
+`STORAGE_UMI_CLIENT_ID`. Both modes also use `BLOB_CONTAINER_NAME` (`data`),
 `BLOB_PRIVATE_CONTAINER_NAME` (`data-private`), `JWT_SECRET` (≥32 chars),
 `ACS_CONNECTION_STRING`, `ACS_SENDER_ADDRESS`, `PURETRACK_*`, `FAI_VALI_ENABLED`
 (process-level kill switch for FAI signature validation), `FAI_VALI_BASE_URL`,
@@ -262,6 +283,13 @@ secret mappings in `terraform-run.yml` for operator secrets (`ops_email`, `puret
 `iac/env/shared.generated.tfvars`; environment plans never load it. There are no GitHub
 Terraform-input variables. Terraform-native `validation` blocks replace the shell required-vars
 pre-check that `terraform-run.yml` used to run. Secrets flow only through the workflow job environment.
+
+The staging storage cutover is deliberately simple: run one `environment/staging` apply
+through the manual `terraform.yml` workflow (or the equivalent local apply), then redeploy
+the application through the existing `deploy-staging.yml` → `deploy-app.yml` path. A brief
+staging interruption between apply and redeploy is acceptable and expected. Rollback is a
+`git revert` of the secure-storage change, followed by one re-apply and redeployment of the
+prior artifact. This is the complete cutover and rollback procedure.
 
 CI (`.github/workflows/`) is DRY: three composite actions (`.github/actions/{setup-node-mise,
 azurite,tf-setup}`) plus two reusable workflows (`deploy-app.yml`, `terraform-run.yml`) that the

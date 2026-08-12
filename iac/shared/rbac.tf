@@ -10,6 +10,11 @@ locals {
   }
 }
 
+output "env_umi_principal_ids" {
+  description = "Terraform UMI principal IDs keyed by environment."
+  value       = var.env_umi_principal_ids
+}
+
 resource "azapi_resource" "env_ai_monitoring_reader" {
   for_each = local.application_umi_principal_ids
 

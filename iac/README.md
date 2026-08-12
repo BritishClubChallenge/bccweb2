@@ -12,7 +12,7 @@ All infrastructure is provisioned using **AzAPI v2.10** with HCL-native bodies.
 
 - `bootstrap/`: One-shot config provisioning the remote state storage account, the per-env Terraform UMIs (GitHub OIDC, RG-scoped Owner), the shared resource group plus one stamp resource group per application environment, and the GitHub environment secrets/variables. Uses **local state** (it provisions its own remote-state target, so it cannot live there itself). See [bootstrap/README.md](bootstrap/README.md).
 - `shared/`: The platform layer used by the stable `staging`/`prod` environments — Sweden Central Log Analytics, per-environment Application Insights, and Azure Communication Services, plus one Standard-tier Static Web App in West Europe (the nearest supported SWA region, with production custom domain/DNS). One remote state, `shared.tfstate`. See [shared/README.md](shared/README.md).
-- `environment/`: Per-env application stack, composed of a single `modules/stamp` child module (storage — two accounts, see below — Flex Consumption Function App, Key Vault, alerts, optional DNS). It reads only non-secret `app_insights_ids`/`acs_id` from the `shared` root's remote state. One `terraform apply` provisions the stamp for a given environment. See [environment/README.md](environment/README.md).
+- `environment/`: Per-env application stack, composed of a single `modules/stamp` child module (storage — two accounts, see below — Flex Consumption Function App, Key Vault, alerts, optional DNS). It reads only non-secret `app_insights_ids`/`acs_id`/`env_umi_principal_ids` from the `shared` root's remote state. One `terraform apply` provisions the stamp for a given environment. See [environment/README.md](environment/README.md).
 - `env/`: Committed environment-specific configuration — `<env>.backend.hcl`, non-secret base values in `<env>.tfvars`, and bootstrap's non-secret `shared.generated.tfvars`. Secrets are supplied through explicit workflow `TF_VAR_*` environment mappings. The generated shared file is intentionally absent until bootstrap first applies, then must be reviewed and committed.
 
 Bootstrap and the committed backend files use one canonical layout: storage
@@ -33,14 +33,30 @@ Bootstrap owns the shared resource group and every environment's stamp resource 
 
 ## Storage split (per environment)
 
-Each environment's stamp has **two storage accounts** — infra-only split, no app-code
-change (the API still uses one shared `BlobServiceClient` per connection string, so the
-public/private containers can't themselves be split across accounts):
+Each environment's stamp has **two storage accounts** and a dual-mode application seam:
 
-- **Account A** `stbccweb<env>rt` — backs `AzureWebJobsStorage`: runtime host storage,
-  all ten queues, and the Flex Consumption `deploymentpackage` container.
-- **Account B** `stbccweb<env>data` — backs `BLOB_CONNECTION_STRING`: the `data`
-  (public) and `data-private` containers.
+- **Account A** `stbccweb<env>rt` — runtime host storage, all ten queues, and the Flex
+  Consumption `deploymentpackage` container. Local Azurite uses `AzureWebJobsStorage`;
+  deployed Azure uses hierarchical managed-identity settings.
+- **Account B** `stbccweb<env>data` — the `data` (public) and `data-private` containers.
+  Local Azurite uses `BLOB_CONNECTION_STRING`; deployed Azure gives the API its explicit
+  account name and Function UMI client ID.
+
+The stamp module is secure-by-default: it unconditionally uses managed identity,
+sets `allowSharedKeyAccess=false` on both application storage accounts, and grants
+the required RBAC roles. There are no storage identity or Shared Key toggle variables.
+The Function UMI is the workload identity for host, queue, deploymentpackage, and data
+access. The required `operator_principal_id` is the per-environment GitHub OIDC/Terraform
+UMI object ID for operator storage RBAC; it is never the Function UMI client ID. The
+environment root derives it by selecting `var.stamp_name` from `iac/shared`'s
+`env_umi_principal_ids` remote-state output, so `iac/env/shared.generated.tfvars` remains
+the single source of truth rather than duplicating principal IDs in per-environment tfvars.
+
+The operator UMI receives Storage Queue Data Contributor on the runtime account,
+Storage Blob Data Contributor on the data account, and Storage Blob Data Contributor
+scoped to `deploymentpackage`. The Function UMI receives Storage Blob Data Owner plus
+Storage Queue Data Contributor and Storage Table Data Contributor on the runtime account,
+and Storage Blob Data Contributor on the data account.
 
 See [docs/architecture/storage-and-queues.md](../docs/architecture/storage-and-queues.md).
 
@@ -102,7 +118,9 @@ Follow these steps to provision the topology from scratch.
     terraform -chdir=iac/shared apply -var-file=../env/shared.tfvars -var-file=../env/shared.generated.tfvars
     ```
     This provisions the Log Analytics workspace, per-environment Application
-    Insights, Azure Communication Services, and the Standard SWA.
+    Insights, Azure Communication Services, and the Standard SWA, and publishes
+    `env_umi_principal_ids`. Apply (or re-apply) this root before any environment
+    apply so its remote state contains that output.
 5.  **Prepare the environment root's local overlay**: the canonical backend
     file (`iac/env/<env>.backend.hcl`) is committed and may also be generated
     by bootstrap at that same path. `iac/env/staging.tfvars` is already the
@@ -142,8 +160,10 @@ Follow these steps to provision the topology from scratch.
     ```
     This apply provisions the stamp module (storage — two accounts, Flex
     Consumption Function App, Key Vault, alerts) for the given environment,
-    reading Application Insights and ACS identifiers from `iac/shared`'s
-    remote state.
+    reading Application Insights and ACS identifiers plus the environment's
+    operator principal ID from `iac/shared`'s remote state. The shared root must
+    already have been applied with its `env_umi_principal_ids` output before this
+    environment apply can succeed.
 
     Staging may be provisioned initially with `allowed_origins = []`; this emits
     no Blob Storage CORS rule and is therefore not ready for browser SPA use.
@@ -174,6 +194,24 @@ Follow these steps to provision the topology from scratch.
     encounter a `403 Forbidden` error when writing secrets to Key Vault.
     This is caused by Azure RBAC propagation lag. Simply re-run the apply
     to resolve it.
+
+## Staging storage cutover and rollback
+
+The stamp is secure-by-default when applied. Production is undeployed; when applied, it
+will receive the same managed-identity configuration with Shared Key disabled. Staging
+cutover is one `terraform apply`, either through the manual `terraform.yml` workflow or
+locally, followed by a redeploy of the application. A brief staging interruption during
+the cutover is acceptable.
+
+Rollback is source-driven and has one procedure: `git revert` the secure-storage change,
+re-apply, and redeploy the prior artifact. `storage-rbac.tf` was added by this change, so
+reverting it deletes the file and the next apply destroys all seven role assignments.
+Rolling forward again re-creates them and is subject to Azure RBAC propagation delay, same
+as the first apply.
+
+No data and no storage topology is removed by this rollback; the only thing it removes is
+the role assignments, which roll-forward restores. A fresh role assignment can return 403
+until Azure propagation completes; wait and retry rather than weakening scopes.
 
 ## Secret Rotation
 
@@ -243,8 +281,10 @@ load that same file with `-var-file`; there is no GitHub-side duplicate to
 keep in sync, and rotating one of these values (e.g. bumping
 `jwt_secret_version`) means editing the base file and re-applying, not
 touching GitHub. The bootstrap-created UMI object IDs live in the reviewed,
-committed `iac/env/shared.generated.tfvars`; no Terraform input is supplied by
-a GitHub Actions variable.
+committed `iac/env/shared.generated.tfvars`; the shared root publishes that map
+as `env_umi_principal_ids`, and each environment selects its own principal ID
+from shared remote state. No per-environment tfvars or GitHub Actions variable
+duplicates it.
 
 | Name | Kind | Environments | Bootstrap-published or operator-set |
 |---|---|---|---|

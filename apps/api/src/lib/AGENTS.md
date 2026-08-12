@@ -7,9 +7,13 @@ don't re-read the source.
 ## queue.ts — producers + job schemas
 
 - `enqueueBriefPdf`/`enqueueSignToFlyReflect`/`enqueuePureTrackGroupJob` and
-  `igcValidationJob.ts`'s `enqueueIgcValidation` use `AzureWebJobsStorage` (the only
-  setting with a `QueueEndpoint` locally). **Never** switch a producer to
-  `BLOB_CONNECTION_STRING` — that's blob-only and would silently break queueing.
+  `igcValidationJob.ts`'s `enqueueIgcValidation` obtain named runtime-account clients
+  through `storageClients.ts`. Local/Azurite mode uses `AzureWebJobsStorage` (the only
+  setting with a `QueueEndpoint` locally); identity mode uses
+  `RUNTIME_STORAGE_ACCOUNT_NAME` plus `STORAGE_UMI_CLIENT_ID`. The Functions host's queue
+  triggers separately resolve `AzureWebJobsStorage__accountName`, `__credential`, and
+  `__clientId`. **Never** switch a producer to `BLOB_CONNECTION_STRING` — that's blob-only
+  and would silently break queueing.
 - `BriefPdfJobSchema`, `SignToFlyReflectJobSchema`, `PureTrackGroupJobSchema` are
   `z.object({...}).strict()` — any extra key is rejected at serialisation time so PII can
   never enter a queue message. `RescoreJobMessageSchema` (same pattern) lives in
@@ -23,6 +27,13 @@ don't re-read the source.
 
 ## blob.ts — clients + leases
 
+- `storageClients.ts` is the only application SDK-construction/authentication seam:
+  `BLOB_CONNECTION_STRING` preserves local/Azurite behavior; deployed Azure uses the data-account
+  pair `BLOB_STORAGE_ACCOUNT_NAME` + `STORAGE_UMI_CLIENT_ID` selects the Function UMI.
+  This workload identity is distinct from the staging OIDC operator identity used by
+  scripts and deployment automation. Direct container helpers call
+  `getBlobServiceClient().getContainerClient(name)` so public/private names stay local to
+  their existing owners.
 - `getBlobClient/getBlockBlobClient(path)` (public), `getPrivateBlobClient/...` (private).
 - `readBlob(client)` raw JSON parse (missing → Azure 404). `writeBlob(path,data,leaseId?,{ifNoneMatch?})`.
 - `writePrivateBlob(path,data,leaseId?,{ifNoneMatch?})` — `ifNoneMatch:"*"` = create-only.
@@ -36,7 +47,8 @@ don't re-read the source.
   30s leases that retry on 409/412 contention so concurrent cross-blob edits serialize. The
   brief blob must already exist — create-or-skip it (`writePrivateBlob(..., {ifNoneMatch:"*"})`)
   first. Route every brief edit / brief-complete / signature cross-blob RMW through this.
-- `resetBlobSingletons()` — **test-only**; clears cached service/container clients.
+- `resetBlobSingletons()` / `resetQueueSingletons()` — **test-only**; clear their local
+  caches and the shared `storageClients.ts` caches so environment is re-read.
 - Gotcha: release failure is telemetry-only; the fn's result/error wins.
 
 ## blobJson.ts — schema-validated JSON (the real read/write helpers live HERE, not blob.ts)

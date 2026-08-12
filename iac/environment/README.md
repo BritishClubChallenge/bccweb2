@@ -10,9 +10,9 @@ Composes one [`modules/stamp`](modules/stamp) child module containing the app's
 runtime and data storage accounts, Function App, Key Vault (RBAC, 6 secrets),
 and alert rules.
 The shared root owns Application Insights, ACS, and the Static Web App. The
-environment root reads `app_insights_ids`, `acs_id`, and `acs_sender_address`
-from shared state; Key Vault fetches both connection strings directly from
-those resource IDs.
+environment root reads `app_insights_ids`, `acs_id`, `acs_sender_address`, and
+`env_umi_principal_ids` from shared state; Key Vault fetches both connection
+strings directly from those resource IDs.
 
 The stamp resource group is pre-created by
 [`iac/bootstrap`](../bootstrap/README.md), which grants the environment's
@@ -42,11 +42,13 @@ CI loads the committed base with `-var-file`; `terraform-run.yml` maps only
 the secrets explicitly into `TF_VAR_*` job environment entries (see
 `.github/workflows/terraform-run.yml`). The shared-only
 `iac/env/shared.generated.tfvars` is never loaded by environment plans.
+Instead, `iac/shared` publishes its map as `env_umi_principal_ids`, and the
+environment root selects the entry keyed by `stamp_name`.
 
 ## Required inputs
 
-Every apply needs these set (via committed tfvars for the topology, local
-tfvars/GitHub Secrets for the operator secrets):
+Every apply needs these values available through committed tfvars, shared remote
+state, or local tfvars/GitHub Secrets as shown:
 
 | Variable | Source | Notes |
 |---|---|---|
@@ -54,6 +56,7 @@ tfvars/GitHub Secrets for the operator secrets):
 | `stamp_rg_name` | Committed base tfvars (`iac/env/<env>.tfvars`) | Deterministic once `terraform_umis`/`github_environments` are fixed in bootstrap; not a GitHub variable. |
 | `tfstate_resource_group_name` | Committed base tfvars (`iac/env/<env>.tfvars`) | Resource group containing the canonical state account; deterministic, not a GitHub variable. |
 | `tfstate_storage_account_name` | Committed base tfvars (`iac/env/<env>.tfvars`) | Canonical state account containing `tfstate-shared/shared.tfstate`; deterministic, not a GitHub variable. |
+| `operator_principal_id` | `iac/shared` remote-state output `env_umi_principal_ids[stamp_name]` | Object ID of the environment's GitHub OIDC/Terraform UMI. `iac/env/shared.generated.tfvars` is the single source of truth; per-environment tfvars do not duplicate it. It receives operator storage RBAC and is never the Function UMI client ID. |
 | `ops_email` | tfvars locally / `secrets.TF_VAR_ops_email` in CI | Alert recipient; treated as a Secret, not a Variable, even though it isn't sensitive (public repo). |
 | `puretrack_api_key`, `puretrack_email`, `puretrack_password` | `TF_VAR_*` secrets | Sensitive; never written to a tfvars file in CI. |
 
@@ -68,6 +71,37 @@ Optional inputs (`allowed_origins`, `slack_webhook_url`, `jwt_secret_version`,
 `acs_secret_version`, `blob_schema_mode`, `terraform_principal_type`) have defaults — see
 [`variables.tf`](variables.tf) and `../env/<env>.tfvars.example`.
 
+## Storage identity and RBAC
+
+The stamp is secure-by-default and unconditionally uses managed identity with
+`allowSharedKeyAccess=false` on both application storage accounts. The Function UMI is
+the workload identity: it receives Storage Blob Data Owner, Storage Queue Data Contributor,
+and Storage Table Data Contributor on the runtime account, plus Storage Blob Data Contributor
+on the data account. Terraform configures Flex deployment with that UMI, the Functions host with
+`AzureWebJobsStorage__accountName`/`__credential`/`__clientId`, and the API with
+`RUNTIME_STORAGE_ACCOUNT_NAME`, `BLOB_STORAGE_ACCOUNT_NAME`, and
+`STORAGE_UMI_CLIENT_ID`.
+
+The required stamp-module `operator_principal_id` is a different identity: the environment's
+GitHub OIDC/Terraform UMI used by deployment and remote operator scripts. The environment
+root derives it from shared state via `env_umi_principal_ids[var.stamp_name]`. It receives
+runtime Queue Contributor, data-account Blob Contributor, and `deploymentpackage`-scoped
+Blob Contributor. Persistent grants do not go to local humans; a human using `az login`
+needs a separate approved grant. Local/dev/Azurite continues to use
+`AzureWebJobsStorage` and `BLOB_CONNECTION_STRING`.
+
+Production is undeployed; when applied it will receive this same secure-by-default model.
+Staging cutover is a single `terraform apply` through the manual `terraform.yml` workflow
+or a local apply, followed by a redeploy. A brief staging interruption during cutover is
+acceptable.
+
+Rollback is a `git revert` of the secure-storage change, one re-apply, and a redeploy of
+the prior artifact. `storage-rbac.tf` was added by this change, so the revert removes it
+and destroys all seven role assignments; rolling forward again re-creates them, subject to
+Azure RBAC propagation delay. No data or storage topology is removed. See
+[../README.md](../README.md#staging-storage-cutover-and-rollback) for the full procedure
+and the 403/propagation guidance.
+
 **Precedence note**: `-var-file` values always override `TF_VAR_*`
 environment variables for the same variable name, and a later `-var-file`
 overrides an earlier one for the same variable. Passing both the committed
@@ -75,6 +109,10 @@ base and the local overlay (base first, overlay second) is the recommended
 local path — see [../README.md](../README.md#first-time-setup) step 5.
 
 ## How to run
+
+Apply (or re-apply) `iac/shared` before an environment apply so shared state publishes
+the `env_umi_principal_ids` output. This ordering is required even when the identities
+already exist, because the environment root consumes the map through remote state.
 
 Preferred — via the manual workflow (uses the env's OIDC UMI). The
 workflow's `env` input is a `[shared, staging, prod]` choice list (see

@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
-import { BlobServiceClient, RestError } from "@azure/storage-blob";
+import { RestError } from "@azure/storage-blob";
+import { getBlobServiceClient } from "../storageClients.js";
 
 export type AuditCategory = "sign-override";
-
-let privateContainer: ReturnType<BlobServiceClient["getContainerClient"]> | null = null;
 
 export async function appendAuditLine(
   category: AuditCategory,
@@ -30,16 +29,10 @@ function auditPath(category: AuditCategory, date: Date): string {
   return `audit/${category}-${date.toISOString().slice(0, 10)}.jsonl`;
 }
 
-function getPrivateContainer(): ReturnType<BlobServiceClient["getContainerClient"]> {
-  if (privateContainer) return privateContainer;
-  const connectionString = process.env["BLOB_CONNECTION_STRING"];
-  if (!connectionString) {
-    throw new Error("BLOB_CONNECTION_STRING environment variable is not set");
-  }
-  privateContainer = BlobServiceClient
-    .fromConnectionString(connectionString)
-    .getContainerClient(process.env["BLOB_PRIVATE_CONTAINER_NAME"] ?? "data-private");
-  return privateContainer;
+function getPrivateContainer() {
+  return getBlobServiceClient().getContainerClient(
+    process.env["BLOB_PRIVATE_CONTAINER_NAME"] ?? "data-private",
+  );
 }
 
 function isAlreadyExists(err: unknown): boolean {

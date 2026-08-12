@@ -26,7 +26,7 @@ Then generate the reconciliation report with `scripts/migrate/reconcile.mjs` (ex
 - `report.perEntity` — `{ <entity>: { count, sample } }` for every `entity:` prefix found in the id-map keys (e.g. `pilot`, `round`, `club`, `site`). Compare each `count` against the legacy database's row count for that entity.
 - `report.anomalies` — an array of `{ type, message }`. The base run (no `--against-prod-snapshot`) can emit `duplicate_uuid` (the same UUID value reused across different id-map keys) or `malformed_key` (an id-map key missing its `entity:` prefix); running with `--against-prod-snapshot <path>` additionally compares expected vs. actual per-entity counts and can also emit `count_mismatch` for any entity that disagrees (see "Reconciliation" below). `reconcile.mjs` exits 1 and logs `Anomalies detected: <n>` when this array is non-empty, or logs `No anomalies detected.` and exits 0 when empty — treat exit code 0 / an empty `anomalies` array as the pass condition, not any legacy-status-normalization claim.
 
-Finally, run the privacy scanner against the dry-run output (if exported to a local Azurite instance) with `BLOB_CONNECTION_STRING="UseDevelopmentStorage=true" node scripts/migrate/validate.mjs` — it has no CLI flags; it reads its target entirely from the `BLOB_CONNECTION_STRING` env var (real storage account connection string, or the Azurite dev-storage shorthand shown here). The scanner must return a clean pass (exit code 0) to ensure no PII (emails, phone numbers, medical info) is leaked into the public `data` container.
+Finally, run the privacy scanner against the dry-run output (if exported to a local Azurite instance) with `BLOB_CONNECTION_STRING="UseDevelopmentStorage=true" node scripts/migrate/validate.mjs` — it has no CLI flags; `BLOB_CONNECTION_STRING` wins when set (the Azurite dev-storage shorthand shown here, or a connection string against a Shared-Key-enabled account), otherwise it falls back to `BLOB_STORAGE_ACCOUNT_NAME` + the invoking identity's `DefaultAzureCredential` (see the "Validation" section below for that remote form). The scanner must return a clean pass (exit code 0) to ensure no PII (emails, phone numbers, medical info) is leaked into the public `data` container.
 
 ## Reconciliation
 
@@ -60,10 +60,21 @@ Validation ensures the newly written blobs are accessible by the API and correct
 
 Run the production validation:
 ```bash
-# Verify public blob accessibility and PII redaction (no CLI flags — target
-# is set entirely via BLOB_CONNECTION_STRING; make build first, since this
-# validator imports @bccweb/schemas from its built dist/):
-BLOB_CONNECTION_STRING="<production storage account connection string>" \
+# Verify public blob accessibility and PII redaction (no CLI flags. Target
+# resolution: BLOB_CONNECTION_STRING wins when set; otherwise
+# BLOB_STORAGE_ACCOUNT_NAME + the invoking identity's DefaultAzureCredential.
+# Storage stamps are secure by default with Shared Key disabled, so use the
+# identity form below against stbccwebproddata: run `az login` first — this
+# requires a separately approved data-plane role grant for your account;
+# persistent remote access belongs to the environment's GitHub OIDC/Terraform
+# UMI, not a human's standing permissions — or rely on CI's OIDC identity.
+# make build first, since this validator imports @bccweb/schemas from its
+# built dist/):
+BLOB_STORAGE_ACCOUNT_NAME="stbccwebproddata" \
+  node scripts/migrate/validate.mjs
+
+# Local/Azurite form (still fully supported — this is how developers run it):
+BLOB_CONNECTION_STRING="UseDevelopmentStorage=true" \
   node scripts/migrate/validate.mjs
 
 # Smoke-check the deployed API the same way deploy-prod.yml's post-deploy

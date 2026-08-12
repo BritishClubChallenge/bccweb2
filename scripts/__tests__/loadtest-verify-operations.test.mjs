@@ -62,7 +62,7 @@ test("queue reader does not fall back to BLOB_CONNECTION_STRING", () => {
       baseUrl: "https://bcc-loadtest.example.test",
       environment: { BLOB_CONNECTION_STRING: "wrong-secret" },
     }),
-    /AzureWebJobsStorage is required/,
+    /AzureWebJobsStorage or RUNTIME_STORAGE_ACCOUNT_NAME is required/,
   );
 });
 
@@ -91,7 +91,7 @@ test("queue reader uses the queue-capable Azurite default only for loopback", ()
       environment: {},
       queueClientFactory: factory,
     }),
-    /AzureWebJobsStorage is required/,
+    /AzureWebJobsStorage or RUNTIME_STORAGE_ACCOUNT_NAME is required/,
   );
 });
 

@@ -16,12 +16,16 @@
  *   1 — one or more checks FAIL (PII found / violation detected)
  */
 
-import { BlobServiceClient } from "@azure/storage-blob";
 import RE2 from "re2";
 import { readFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { findPiiInObject, PII_FIELDS } from "./lib/pii.mjs";
+import {
+  blobStorageIdentity,
+  createBlobServiceClient,
+  preflightBlobReadAccess,
+} from "./lib/storageClients.mjs";
 
 // ─── CLI args ─────────────────────────────────────────────────────────────────
 
@@ -40,10 +44,8 @@ const AZURITE_DEV_CS =
   "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;" +
   "BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;";
 
-const CONNECTION_STRING =
-  sourceArg ??
-  process.env["BLOB_CONNECTION_STRING"] ??
-  AZURITE_DEV_CS;
+const CONNECTION_STRING = sourceArg ?? process.env["BLOB_CONNECTION_STRING"] ??
+  (process.env["BLOB_STORAGE_ACCOUNT_NAME"] ? undefined : AZURITE_DEV_CS);
 
 const BUNDLE_PATTERNS = bundlePatternsArg
   ? bundlePatternsArg
@@ -103,13 +105,19 @@ async function checkPublicBlobs() {
   const CHECK = "public-blob-scan";
   let blobService;
   try {
-    blobService = BlobServiceClient.fromConnectionString(CONNECTION_STRING);
+    blobService = createBlobServiceClient({ connectionString: CONNECTION_STRING });
   } catch (err) {
     fail(CHECK, [{ error: `Cannot build BlobServiceClient: ${err.message}` }]);
     return;
   }
 
   const container = blobService.getContainerClient(PUBLIC_CONTAINER);
+  try {
+    await preflightBlobReadAccess({ container, connectionString: CONNECTION_STRING });
+  } catch (err) {
+    fail(CHECK, [{ error: err instanceof Error ? err.message : "Blob read preflight failed" }]);
+    return;
+  }
 
   let scanned = 0;
   const violations = [];
@@ -321,7 +329,8 @@ async function checkFunctionLogsFixture() {
 async function main() {
   console.log("=== BCC Privacy Scanner ===");
   console.log(`PII fields under watch: ${PII_FIELDS.join(", ")}`);
-  console.log(`Blob source: ${CONNECTION_STRING.replace(/AccountKey=[^;]+/, "AccountKey=***")}`);
+  const source = blobStorageIdentity({ connectionString: CONNECTION_STRING });
+  console.log(`Blob source: account=${source.accountName ?? "custom"} endpoint=${source.endpoint}`);
   console.log("");
 
   await checkPublicBlobs();

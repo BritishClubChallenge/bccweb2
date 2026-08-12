@@ -16,6 +16,9 @@ override_data {
       app_insights_ids = {
         unit = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-bccweb-shared/providers/Microsoft.Insights/components/appi-bccweb-unit"
       }
+      env_umi_principal_ids = {
+        unit = "00000000-0000-0000-0000-000000000006"
+      }
       acs_id             = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-bccweb-shared/providers/Microsoft.Communication/communicationServices/acs-bccweb-shared"
       acs_sender_address = "noreply@mail.example.test"
     }

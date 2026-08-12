@@ -31,18 +31,54 @@ Atomic read-modify-write on either container uses 30-second blob leases —
 ### Two storage accounts per environment
 
 `data`/`data-private` and the runtime/queue plane live in **two separate Azure Storage
-accounts per environment** — an infra-only split with no app-code change (the API still
-uses one shared `BlobServiceClient` per connection string, so the two containers still
-can't themselves be split across accounts):
+accounts per environment** behind a dual-mode storage adapter:
 
-- **Account A** `stbccweb<env>rt` — backs `AzureWebJobsStorage`: the Functions host's
+- **Account A** `stbccweb<env>rt` — the Functions host's
   runtime storage, all ten queues below, and the Flex Consumption
   `deploymentpackage` blob container the Function App deploys from. Always
   `Standard_LRS`, public blob access disabled, no management lock.
-- **Account B** `stbccweb<env>data` — backs `BLOB_CONNECTION_STRING`: the `data`
+- **Account B** `stbccweb<env>data` — the `data`
   (public) and `data-private` containers described above. Environment-derived
   LRS/GRS replication, public blob access enabled (for `data`), and a prod-only
   `CanNotDelete` lock.
+
+### Secure-by-default identity access
+
+Every environment stamp is unconditionally identity-based: Shared Key is disabled on
+both the runtime and data accounts, and there are no storage-identity or Shared Key toggle
+variables. The runtime and data accounts remain distinct: Functions host state, queues,
+and `deploymentpackage` use the runtime account, while public/private application blobs
+use the data account.
+
+The Function App's UMI is the workload identity for host storage, Flex deployment,
+runtime queues/tables, and data blobs (staging client ID
+`cbbdfdb9-5743-46b9-8ad1-03b94303c0ef`). The host uses
+`AzureWebJobsStorage__accountName`, `AzureWebJobsStorage__credential=managedidentity`,
+and `AzureWebJobsStorage__clientId`; the API adapter uses
+`RUNTIME_STORAGE_ACCOUNT_NAME`, `BLOB_STORAGE_ACCOUNT_NAME`, and
+`STORAGE_UMI_CLIENT_ID`. The required `operator_principal_id` for each environment is the
+object ID of that environment's GitHub OIDC/Terraform UMI. In staging this is
+`4eabcaaf-5340-41b7-9ed2-7b47ebeaa7cd`; it authenticates deployment and remote operator
+scripts and receives only its queue, data-blob, and `deploymentpackage` grants. It must
+not be confused with the Function UMI client ID.
+
+Local development, Docker, tests, and Azurite are the deliberate exception: they retain
+`AzureWebJobsStorage` and `BLOB_CONNECTION_STRING` and do not require Azure identities.
+Production is not deployed and must not be described as already keyless; its first apply
+will create the same secure-by-default identity configuration.
+
+### Staging cutover and rollback
+
+Cut staging over with one `environment/staging` `terraform apply`, using the manual
+`.github/workflows/terraform.yml` workflow or the equivalent local command, then redeploy
+through the existing `deploy-staging.yml` → `deploy-app.yml` path. A brief staging
+interruption between the infrastructure apply and application redeploy is acceptable and
+expected. Afterward, dispatch `staging-storage-operator-smoke.yml` to run the non-mutating
+queue verifier and dedicated blob/queue canaries.
+
+Rollback is source-driven: `git revert` the secure-storage change, re-apply the reverted
+environment configuration, and redeploy the prior artifact. There are no storage-auth
+toggle variables or alternate transitional procedures.
 
 ## Schema layer
 
@@ -69,7 +105,7 @@ valid for non-JSON artifacts and explicitly justified lease/index operations.
 
 ## Storage Queues
 
-Ten queues, all in Account A (`stbccweb<env>rt`, the `AzureWebJobsStorage` account — see
+Ten queues, all in Account A (`stbccweb<env>rt`, the runtime account — see
 "Two storage accounts per environment" above), across five families, each a main queue
 plus a `-poison` dead-letter queue (`maxDequeueCount=5` in `host.json`). In Azure, the
 `queue_service` and ten queue resources in
@@ -96,11 +132,23 @@ unreachable the script throws and exits non-zero. Blob containers are created ea
 the same run, so a queue-service outage still surfaces as a hard failure rather than a
 partial success.
 
-**Connection invariant**: every producer (`apps/api/src/lib/queue.ts`,
-`apps/api/src/lib/rescoreJob.ts`, and `apps/api/src/lib/igcValidationJob.ts`) and every
-`app.storageQueue` trigger uses the
-`AzureWebJobsStorage` connection setting — the only setting carrying a `QueueEndpoint` in
-local/Docker. `BLOB_CONNECTION_STRING` is blob-only; using it would silently break queueing.
+**Connection invariant**: every producer and every `app.storageQueue` trigger reaches the
+same runtime account (`stbccweb<env>rt`), but not through the same setting, and
+`BLOB_CONNECTION_STRING` is blob-only in both modes. Using it for queueing would silently
+break it.
+
+- **Local/dev/Docker/Azurite**: producers (`apps/api/src/lib/queue.ts`,
+  `apps/api/src/lib/rescoreJob.ts`, `apps/api/src/lib/igcValidationJob.ts`, via the
+  `storageClients.ts` seam) and every trigger both read the `AzureWebJobsStorage`
+  connection string, the only setting carrying a `QueueEndpoint` locally.
+- **Deployed Azure**: the split is producer vs. trigger, not shared. Producers go through
+  `storageClients.ts`'s `getRuntimeQueueClient`, which builds a `QueueClient` from
+  `RUNTIME_STORAGE_ACCOUNT_NAME` plus `STORAGE_UMI_CLIENT_ID` (the Function UMI). The
+  Functions host's `app.storageQueue` triggers instead resolve the hierarchical
+  `AzureWebJobsStorage__accountName`, `AzureWebJobsStorage__credential=managedidentity`,
+  and `AzureWebJobsStorage__clientId` settings directly. There is no plain
+  `AzureWebJobsStorage` connection string in Azure, so do not restore one during or after
+  the cutover.
 
 **Queue privacy**: `privacy-scan.mjs` does not cover Storage Queues. The compensating
 control is strict, `.strict()` job schemas in `apps/api/src/lib/queue.ts`,

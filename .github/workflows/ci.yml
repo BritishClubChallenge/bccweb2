@@ -86,16 +86,9 @@ jobs:
         run: npm ci
         working-directory: scripts/migrate
 
+      # Discover this suite so a new migration test cannot be silently skipped.
       - name: Run migration script tests
-        run: |
-          node --test \
-            scripts/migrate/__tests__/enum-normalize.test.mjs \
-            scripts/migrate/__tests__/migration.smoke.test.mjs \
-            scripts/migrate/__tests__/pilot-club-history.test.mjs \
-            scripts/migrate/__tests__/reconcile.test.mjs \
-            scripts/migrate/__tests__/transforms.test.mjs \
-            scripts/migrate/__tests__/validate-heal-classify.test.mjs \
-            scripts/migrate/__tests__/validate.manufacturers.test.mjs
+        run: node --test scripts/migrate/__tests__/*.test.mjs
 
       - name: Run tests
         run: make test

@@ -19,8 +19,8 @@
     "iac:platform-contract": "bash scripts/iac/check-shared-resource-contract.sh",
     "iac:stamp-storage-split": "bash scripts/iac/check-stamp-storage-split.sh",
     "fixtures:audit": "node scripts/audit-fixtures.mjs --json",
-    "admin:test": "node --test scripts/admin/__tests__/move-manufacturers-to-public.test.mjs scripts/admin/__tests__/reconcile-orphan-igcs.test.mjs scripts/admin/__tests__/redispatch-stuck-igc-validations.test.mjs",
-    "fixtures:test": "node --test scripts/__tests__/fixture-operation.test.mjs scripts/__tests__/loadtest-topology.test.mjs scripts/__tests__/seed-fixture-pilots.test.mjs scripts/__tests__/seed-fixtures.integration.test.mjs scripts/__tests__/seed-fixtures.adversarial.test.mjs scripts/__tests__/seed-fixtures.transaction.test.mjs",
+    "admin:test": "node --test scripts/admin/__tests__/*.test.mjs",
+    "fixtures:test": "node --test scripts/__tests__/storageClients.test.mjs scripts/__tests__/fixture-operation.test.mjs scripts/__tests__/loadtest-topology.test.mjs scripts/__tests__/seed-fixture-pilots.test.mjs scripts/__tests__/seed-fixtures.integration.test.mjs scripts/__tests__/seed-fixtures.adversarial.test.mjs scripts/__tests__/seed-fixtures.transaction.test.mjs",
     "loadtest:test": "node --test scripts/__tests__/dev-credentials.test.mjs scripts/__tests__/loadtest-*.test.mjs tests/load/*.test.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "e2e": "playwright test --config tests/e2e/playwright.config.ts"
@@ -49,5 +49,8 @@
   },
   "overrides": {
     "@babel/core": "^7.29.6"
+  },
+  "dependencies": {
+    "@azure/identity": "4.13.1"
   }
 }

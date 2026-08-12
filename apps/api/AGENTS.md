@@ -47,12 +47,19 @@ Bespoke HS256 JWT (`JWT_SECRET` env, ≥32 chars). Access token 1h, refresh 30d.
 
 ## Env
 
-See [local.settings.example.json](local.settings.example.json): `AzureWebJobsStorage`,
-`BLOB_CONNECTION_STRING`,
+Storage has a dual-mode application seam. Local/dev/Azurite uses `AzureWebJobsStorage` and
+`BLOB_CONNECTION_STRING` from [local.settings.example.json](local.settings.example.json).
+Deployed Azure is secure-by-default and gives the Functions host `AzureWebJobsStorage__accountName`,
+`AzureWebJobsStorage__credential=managedidentity`, and `AzureWebJobsStorage__clientId`;
+the API SDK seam uses `RUNTIME_STORAGE_ACCOUNT_NAME`, `BLOB_STORAGE_ACCOUNT_NAME`, and
+`STORAGE_UMI_CLIENT_ID`. The Function UMI authenticates deployed host, queue, and data
+access; it is not the staging GitHub OIDC operator UMI used by workflows/scripts.
+`storageClients.ts` owns this mode selection and fails on incomplete identity settings.
+Other settings are
 `BLOB_CONTAINER_NAME` (`data`), `BLOB_PRIVATE_CONTAINER_NAME` (`data-private`),
 `JWT_SECRET`, `ACS_CONNECTION_STRING`, `ACS_SENDER_ADDRESS`,
 `PURETRACK_*`, `FAI_VALI_ENABLED`, `FAI_VALI_BASE_URL`, `FAI_VALI_TIMEOUT_MS`.
-Copy the example → `local.settings.json`.
+Copy the example → `local.settings.json`; local Azurite remains connection-string based.
 
 ## Testing — gotchas
 

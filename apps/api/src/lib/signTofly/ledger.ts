@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import type { HttpRequest } from "@azure/functions";
 import type { RoundBrief, Signature, SignToFlyWording } from "@bccweb/types";
-import { BlobServiceClient, ContainerClient } from "@azure/storage-blob";
 import { SignatureLedgerSchema } from "@bccweb/schemas";
 import {
   getPrivateBlobClient,
@@ -11,8 +10,7 @@ import {
 import { readJson } from "../blobJson.js";
 import { trustedClientIp } from "../clientIp.js";
 import { computeBriefHash } from "./briefVersion.js";
-
-let privateContainer: ContainerClient | null = null;
+import { getBlobServiceClient } from "../storageClients.js";
 
 export function signaturePath(
   roundId: string,
@@ -188,14 +186,8 @@ function isPreconditionFailed(err: unknown): boolean {
   return storageErr.statusCode === 412 || storageErr.statusCode === 409 || storageErr.code === "BlobAlreadyExists";
 }
 
-function getPrivateContainer(): ContainerClient {
-  if (privateContainer) return privateContainer;
-  const connectionString = process.env["BLOB_CONNECTION_STRING"];
-  if (!connectionString) {
-    throw new Error("BLOB_CONNECTION_STRING environment variable is not set");
-  }
-  privateContainer = BlobServiceClient
-    .fromConnectionString(connectionString)
-    .getContainerClient(process.env["BLOB_PRIVATE_CONTAINER_NAME"] ?? "data-private");
-  return privateContainer;
+function getPrivateContainer() {
+  return getBlobServiceClient().getContainerClient(
+    process.env["BLOB_PRIVATE_CONTAINER_NAME"] ?? "data-private",
+  );
 }

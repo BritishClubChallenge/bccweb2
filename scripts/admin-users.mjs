@@ -13,6 +13,7 @@
  *
  * Usage:
  *   BLOB_CONNECTION_STRING="..." node scripts/admin-users.mjs list
+ *   BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata" node scripts/admin-users.mjs list
  *   BLOB_CONNECTION_STRING="..." node scripts/admin-users.mjs find user@example.com
  *   BLOB_CONNECTION_STRING="..." node scripts/admin-users.mjs reset-password user@example.com
  *
@@ -24,10 +25,13 @@
  *   node scripts/admin-users.mjs list
  */
 
-import { BlobServiceClient } from "@azure/storage-blob";
 import bcrypt from "bcryptjs";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout, exit } from "node:process";
+import {
+  createBlobServiceClient,
+  preflightBlobReadAccess,
+} from "./lib/storageClients.mjs";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -46,22 +50,26 @@ function rewriteDockerHost(cs) {
   );
 }
 
-const RAW_BLOB_CS = process.env.BLOB_CONNECTION_STRING ?? AZURITE_DEV_CS;
-const BLOB_CS = rewriteDockerHost(RAW_BLOB_CS);
+const RAW_BLOB_CS = process.env.BLOB_CONNECTION_STRING;
+const BLOB_CS = RAW_BLOB_CS
+  ? rewriteDockerHost(RAW_BLOB_CS)
+  : process.env.BLOB_STORAGE_ACCOUNT_NAME
+    ? undefined
+    : AZURITE_DEV_CS;
 const PRIVATE_CONTAINER = process.env.BLOB_PRIVATE_CONTAINER_NAME ?? "data-private";
 const BCRYPT_COST = 12;
 
-if (!process.env.BLOB_CONNECTION_STRING) {
+if (!RAW_BLOB_CS && !process.env.BLOB_STORAGE_ACCOUNT_NAME) {
   console.error(
     "Note: BLOB_CONNECTION_STRING not set — using local Azurite (127.0.0.1:10000).",
   );
-} else if (RAW_BLOB_CS !== BLOB_CS) {
+} else if (RAW_BLOB_CS && RAW_BLOB_CS !== BLOB_CS) {
   console.error(
     "Note: rewrote BlobEndpoint host `azurite` → `127.0.0.1` for host-shell use.",
   );
 }
 
-const blobService = BlobServiceClient.fromConnectionString(BLOB_CS);
+const blobService = createBlobServiceClient({ connectionString: BLOB_CS });
 const container = blobService.getContainerClient(PRIVATE_CONTAINER);
 
 // ─── Blob helpers ─────────────────────────────────────────────────────────────
@@ -290,7 +298,9 @@ Roles: ${VALID_ROLES.join(", ")}
   exit(1);
 }
 
-commands[command]().catch((err) => {
-  console.error(`Error: ${err.message}`);
-  exit(1);
-});
+preflightBlobReadAccess({ container, connectionString: BLOB_CS })
+  .then(() => commands[command]())
+  .catch((err) => {
+    console.error(`Error: ${err.message}`);
+    exit(1);
+  });

@@ -28,24 +28,25 @@ locals {
 module "stamp" {
   source = "./modules/stamp"
 
-  stamp_name         = var.stamp_name
-  stamp_rg_name      = var.stamp_rg_name
-  location           = var.location
-  allowed_origins    = var.allowed_origins
-  storage_sku        = local.storage_sku
-  enable_delete_lock = local.enable_delete_lock
-  always_ready_count = local.always_ready_count
-  ops_email          = var.ops_email
-  slack_webhook_url  = var.slack_webhook_url
-  acs_id             = data.terraform_remote_state.shared.outputs.acs_id
-  acs_sender_address = data.terraform_remote_state.shared.outputs.acs_sender_address
-  puretrack_api_key  = var.puretrack_api_key
-  puretrack_email    = var.puretrack_email
-  puretrack_password = var.puretrack_password
-  jwt_secret_version = var.jwt_secret_version
-  acs_secret_version = var.acs_secret_version
-  blob_schema_mode   = var.blob_schema_mode
-  tags               = local.tags
+  stamp_name            = var.stamp_name
+  stamp_rg_name         = var.stamp_rg_name
+  location              = var.location
+  allowed_origins       = var.allowed_origins
+  operator_principal_id = data.terraform_remote_state.shared.outputs.env_umi_principal_ids[var.stamp_name]
+  storage_sku           = local.storage_sku
+  enable_delete_lock    = local.enable_delete_lock
+  always_ready_count    = local.always_ready_count
+  ops_email             = var.ops_email
+  slack_webhook_url     = var.slack_webhook_url
+  acs_id                = data.terraform_remote_state.shared.outputs.acs_id
+  acs_sender_address    = data.terraform_remote_state.shared.outputs.acs_sender_address
+  puretrack_api_key     = var.puretrack_api_key
+  puretrack_email       = var.puretrack_email
+  puretrack_password    = var.puretrack_password
+  jwt_secret_version    = var.jwt_secret_version
+  acs_secret_version    = var.acs_secret_version
+  blob_schema_mode      = var.blob_schema_mode
+  tags                  = local.tags
 
   app_insights_id               = data.terraform_remote_state.shared.outputs.app_insights_ids[var.stamp_name]
   terraform_principal_object_id = data.azapi_client_config.current.object_id

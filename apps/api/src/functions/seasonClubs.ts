@@ -6,7 +6,6 @@ import {
   HttpResponseInit,
   InvocationContext,
 } from "@azure/functions";
-import { BlobServiceClient, ContainerClient } from "@azure/storage-blob";
 import { createHash } from "crypto";
 import type { Club, ClubTeam, ClubTeamSummary, Config, Round, SeasonClub } from "@bccweb/types";
 import {
@@ -33,6 +32,7 @@ import {
 } from "../lib/auth.js";
 import { HttpError, withErrorHandler } from "../lib/http.js";
 import { mutationRateLimit } from "../lib/rateLimit.js";
+import { getBlobServiceClient } from "../lib/storageClients.js";
 
 interface SeasonClubIndexEntry {
   id: string;
@@ -77,15 +77,9 @@ interface UpdateSeasonClubBody {
   acceptedTsCs?: boolean;
 }
 
-let privateContainer: ContainerClient | null = null;
-
-function getPrivateContainer(): ContainerClient {
-  if (privateContainer) return privateContainer;
-  const connectionString = process.env["BLOB_CONNECTION_STRING"];
-  if (!connectionString) throw new Error("BLOB_CONNECTION_STRING environment variable is not set");
+function getPrivateContainer() {
   const containerName = process.env["BLOB_PRIVATE_CONTAINER_NAME"] ?? "data-private";
-  privateContainer = BlobServiceClient.fromConnectionString(connectionString).getContainerClient(containerName);
-  return privateContainer;
+  return getBlobServiceClient().getContainerClient(containerName);
 }
 
 function parseYear(req: HttpRequest): number {

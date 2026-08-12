@@ -29,6 +29,27 @@ unreachable the script throws and exits non-zero, exactly like `round-brief-pdf`
 containers are created earlier in the same run, so a queue-service outage still surfaces
 as a hard failure rather than a silent partial success.
 
+## Storage authentication for root scripts
+
+Root-package operator scripts use `lib/storageClients.mjs`. Local/Azurite execution uses
+`BLOB_CONNECTION_STRING` and `AzureWebJobsStorage`; remote keyless execution requires
+`BLOB_STORAGE_ACCOUNT_NAME` for data blobs and `RUNTIME_STORAGE_ACCOUNT_NAME` for queues,
+authenticated as the invoking operator/OIDC identity through `DefaultAzureCredential`.
+Do not bind these scripts to the Function App managed identity or set
+`STORAGE_UMI_CLIENT_ID` for them: that setting belongs to the API adapter. Persistent
+remote data/queue/deployment-package roles belong to each environment's GitHub OIDC UMI,
+whose object ID is the stamp's required `operator_principal_id`; a local human using
+`az login` needs a separately approved grant. The Function UMI remains the workload
+identity. Azure stamps unconditionally use managed identity with Shared Key disabled on
+both accounts, with no identity or Shared Key toggles. Production is not deployed, but it
+will receive this secure-by-default contract when applied. `init-storage.mjs` remains an
+Azurite-only Shared Key REST bootstrap and deliberately does not use the adapter.
+
+For the staging cutover, run one `environment/staging` apply through the manual
+`terraform.yml` workflow (or locally), then redeploy through the existing staging deploy
+path; a brief interruption is expected. Roll back with `git revert`, re-apply, and redeploy
+the prior artifact. This is the complete operator procedure.
+
 ## `privacy-scan.mjs` — CI success gate
 
 Fails CI if PII leaks into public blobs, the SPA bundle, or telemetry/log fixtures. Its

@@ -18,8 +18,12 @@
 
 import { randomBytes } from "node:crypto";
 import { BlobServiceClient, ContainerClient } from "@azure/storage-blob";
-import { afterAll, beforeAll } from "vitest";
+import { afterAll, beforeAll, expect } from "vitest";
 import { resetBlobSingletons } from "../../lib/blob.js";
+
+const usesAzurite = !expect
+  .getState()
+  .testPath?.endsWith("/storageClients.test.ts");
 
 // MODULE SCOPE: must run before any test imports of lib/blob.ts read these envs.
 const suffix = randomBytes(6).toString("hex");
@@ -96,6 +100,7 @@ async function sweepStaleTestContainers(
 // ─── Lifecycle hooks ─────────────────────────────────────────────────────────
 
 beforeAll(async () => {
+  if (!usesAzurite) return;
   blobService = BlobServiceClient.fromConnectionString(CONNECTION_STRING);
 
   // Sweep stale test-* containers BEFORE creating ours. Best-effort.
@@ -115,6 +120,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!usesAzurite) return;
   await Promise.all([
     publicContainer.deleteIfExists(),
     privateContainer.deleteIfExists(),

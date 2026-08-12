@@ -161,6 +161,7 @@ expected_outputs="$(printf '%s\n' \
   'acs_id' \
   'acs_sender_address' \
   'app_insights_ids' \
+  'env_umi_principal_ids' \
   'log_analytics_workspace_id' \
   'swa_default_hostname' \
   'swa_id' \
@@ -202,4 +203,4 @@ if printf '%s\n' "$output_bodies" | grep -nE '(listKeys|ConnectionString|primary
 fi
 
 printf 'Shared managed-resource contract passed. Exact managed set:\n%s\n' "$managed_set"
-printf 'Shared output contract passed: 9 exact non-secret outputs.\n'
+printf 'Shared output contract passed: 10 exact non-secret outputs.\n'

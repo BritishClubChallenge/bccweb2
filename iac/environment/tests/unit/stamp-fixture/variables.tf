@@ -35,6 +35,12 @@ variable "allowed_origins" {
   default     = []
 }
 
+variable "operator_principal_id" {
+  description = "Deployment operator service-principal object ID granted required storage data-plane access."
+  type        = string
+  nullable    = false
+}
+
 variable "storage_sku" {
   description = "Replication SKU for the application data storage account."
   type        = string

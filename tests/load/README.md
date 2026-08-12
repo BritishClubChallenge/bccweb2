@@ -50,7 +50,7 @@ The status artifact always contains these rows in this exact order:
    flags, final-100 IDs, and one same-ID HTTP 200 replay. A persisted errored key is
    replayed when coherent; otherwise the verifier labels a deterministic successful
    key `replay=fallback`. This phase also observes the dedicated `signtofly-reflect`
-   and poison queues through `AzureWebJobsStorage`; it requires
+   and poison queues through `AzureWebJobsStorage` or `RUNTIME_STORAGE_ACCOUNT_NAME`; it requires
    approximate global counts of zero twice at least two seconds apart after replay;
    it never peeks, dequeues, or treats this approximation as valid on a shared stack.
 8. **Cleanup** (`loadtest-cleanup`) deletes only the checkpoint-owned round,
@@ -62,8 +62,8 @@ The register and sign clients deliberately do not retry failed operations, so ev
 response remains visible in the result.
 
 The host verifier defaults to the queue-capable local Azurite endpoint for loopback
-runs. Dedicated remote runs must export `AzureWebJobsStorage`; blob-only
-`BLOB_CONNECTION_STRING` is never a queue fallback.
+runs. Dedicated remote runs must export `AzureWebJobsStorage` or
+`RUNTIME_STORAGE_ACCOUNT_NAME`; blob-only `BLOB_CONNECTION_STRING` is never a queue fallback.
 
 ## Running
 
