@@ -75,7 +75,8 @@ jobs:
           const queueName = `mi-canary-${runId}`;
           const queue = queueService.getQueueClient(queueName);
           try {
-            await queue.create();
+            await queue.createIfNotExists();
+            await queue.clearMessages();
             await queue.sendMessage(content);
             const received = await queue.receiveMessages({ numberOfMessages: 1 });
             const message = received.receivedMessageItems[0];

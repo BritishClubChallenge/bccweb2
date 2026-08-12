@@ -75,11 +75,13 @@ export function queueConnectionString() {
   if (typeof process.env.RUNTIME_STORAGE_ACCOUNT_NAME === "string" &&
     process.env.RUNTIME_STORAGE_ACCOUNT_NAME.length > 0) return undefined;
 
+  const blobAccountName = process.env.BLOB_STORAGE_ACCOUNT_NAME;
   const blobConnection = process.env.BLOB_CONNECTION_STRING;
   if (
-    blobConnection === undefined ||
-    blobConnection.includes("localhost") ||
-    blobConnection.includes("127.0.0.1")
+    !(typeof blobAccountName === "string" && blobAccountName.length > 0) &&
+    (blobConnection === undefined ||
+      blobConnection.includes("localhost") ||
+      blobConnection.includes("127.0.0.1"))
   ) {
     return LOCAL_AZURITE_QUEUE_CONNECTION;
   }

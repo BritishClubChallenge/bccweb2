@@ -28,6 +28,11 @@ const AZURITE_DEV_CS =
   "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;" +
   "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;" +
   "BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;";
+const LOCAL_AZURITE_QUEUE_CONNECTION = `${AZURITE_DEV_CS}QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;`;
+const REMOTE_BLOB_CONNECTION = "DefaultEndpointsProtocol=https;AccountName=remote";
+const EXPECT_QUEUE_CONFIGURATION_ERROR = Symbol("queue configuration error");
+const QUEUE_ENV_NAMES = ["AzureWebJobsStorage", "RUNTIME_STORAGE_ACCOUNT_NAME",
+  "BLOB_STORAGE_ACCOUNT_NAME", "BLOB_CONNECTION_STRING"];
 const FUTURE_CUTOFF_MS = 3 * 60 * 60 * 1000;
 const service = BlobServiceClient.fromConnectionString(AZURITE_DEV_CS);
 const createdContainers = new Set();
@@ -68,6 +73,23 @@ function pendingFlight(overrides = {}) {
     },
     ...overrides,
   };
+}
+
+function withQueueEnvironment(environment, assertion) {
+  const previous = Object.fromEntries(
+    QUEUE_ENV_NAMES.map((name) => [name, process.env[name]])
+  );
+  for (const name of QUEUE_ENV_NAMES) delete process.env[name];
+  Object.assign(process.env, environment);
+
+  try {
+    assertion();
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 }
 
 async function freshContainer() {
@@ -197,26 +219,58 @@ test("pre-send recheck protects a candidate whose committed job changed", async 
   assert.ok(lines.includes("Redispatched: 0"));
 });
 
-test("remote redispatch fails closed without AzureWebJobsStorage", () => {
-  // Given
-  const previousQueue = process.env.AzureWebJobsStorage;
-  const previousBlob = process.env.BLOB_CONNECTION_STRING;
-  delete process.env.AzureWebJobsStorage;
-  process.env.BLOB_CONNECTION_STRING = "DefaultEndpointsProtocol=https;AccountName=remote";
+const queueConnectionCases = [
+  [
+    "AzureWebJobsStorage has highest queue connection precedence",
+    {
+      AzureWebJobsStorage: "configured-queue-connection",
+      RUNTIME_STORAGE_ACCOUNT_NAME: "stbccwebstagingrt",
+      BLOB_STORAGE_ACCOUNT_NAME: "stbccwebstagingdata",
+      BLOB_CONNECTION_STRING: REMOTE_BLOB_CONNECTION,
+    },
+    "configured-queue-connection",
+  ],
+  [
+    "runtime storage account selects queue identity mode",
+    {
+      RUNTIME_STORAGE_ACCOUNT_NAME: "stbccwebstagingrt",
+      BLOB_STORAGE_ACCOUNT_NAME: "stbccwebstagingdata",
+      BLOB_CONNECTION_STRING: REMOTE_BLOB_CONNECTION,
+    },
+    undefined,
+  ],
+  ["remote blob account fails closed without queue configuration",
+    { BLOB_STORAGE_ACCOUNT_NAME: "stbccwebstagingdata" },
+    EXPECT_QUEUE_CONFIGURATION_ERROR],
+  ["remote blob account overrides a local blob connection heuristic", {
+      BLOB_STORAGE_ACCOUNT_NAME: "stbccwebstagingdata",
+      BLOB_CONNECTION_STRING: AZURITE_DEV_CS,
+    }, EXPECT_QUEUE_CONFIGURATION_ERROR],
+  ["an unconfigured local target defaults to the Azurite queue", {},
+    LOCAL_AZURITE_QUEUE_CONNECTION],
+  ["a local blob connection selects the Azurite queue",
+    { BLOB_CONNECTION_STRING: AZURITE_DEV_CS }, LOCAL_AZURITE_QUEUE_CONNECTION],
+  ["a remote blob connection fails closed without queue configuration",
+    { BLOB_CONNECTION_STRING: REMOTE_BLOB_CONNECTION }, EXPECT_QUEUE_CONFIGURATION_ERROR],
+  ["an empty blob storage account remains an unconfigured local target",
+    { BLOB_STORAGE_ACCOUNT_NAME: "" }, LOCAL_AZURITE_QUEUE_CONNECTION],
+];
 
-  try {
-    // When / Then
-    assert.throws(
-      () => queueConnectionString(),
-      /AzureWebJobsStorage or RUNTIME_STORAGE_ACCOUNT_NAME is required when redispatching to a remote target/
-    );
-  } finally {
-    if (previousQueue === undefined) delete process.env.AzureWebJobsStorage;
-    else process.env.AzureWebJobsStorage = previousQueue;
-    if (previousBlob === undefined) delete process.env.BLOB_CONNECTION_STRING;
-    else process.env.BLOB_CONNECTION_STRING = previousBlob;
-  }
-});
+for (const [name, environment, expected] of queueConnectionCases) {
+  test(name, () => {
+    // Given / When / Then
+    withQueueEnvironment(environment, () => {
+      if (expected === EXPECT_QUEUE_CONFIGURATION_ERROR) {
+        assert.throws(
+          () => queueConnectionString(),
+          /AzureWebJobsStorage or RUNTIME_STORAGE_ACCOUNT_NAME is required when redispatching to a remote target/
+        );
+        return;
+      }
+      assert.equal(queueConnectionString(), expected);
+    });
+  });
+}
 
 test("redispatch sends the exact base64-encoded IGC validation job", async () => {
   // Given
