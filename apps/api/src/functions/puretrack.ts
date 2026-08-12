@@ -19,7 +19,6 @@ import {
   InvocationContext,
 } from "@azure/functions";
 import { randomUUID } from "node:crypto";
-import { BlobServiceClient } from "@azure/storage-blob";
 import type { Round, PureTrackGroup } from "@bccweb/types";
 import { RoundSchema } from "@bccweb/schemas";
 import * as z from "zod/v4";
@@ -47,6 +46,7 @@ import {
 import { mutatePureTrackEchoes, setPureTrackStatus } from "../lib/puretrackStatus.js";
 import { parsePureTrackRecord } from "../lib/puretrackRecord.js";
 import { enqueuePureTrackGroupJob } from "../lib/queue.js";
+import { getBlobServiceClient } from "../lib/storageClients.js";
 
 const DeletePureTrackGroupsBodySchema = z.object({
   // The 10m host budget reserves 60s for reconciliation after three fixed 60s
@@ -68,11 +68,8 @@ function isAdmin(roles: string[]): boolean {
 // ─── Private container accessor (listing only) ────────────────────────────────
 
 function getPrivateContainerClient() {
-  const conn = process.env["BLOB_CONNECTION_STRING"];
-  if (!conn) throw new Error("BLOB_CONNECTION_STRING is not set");
-  const svc = BlobServiceClient.fromConnectionString(conn);
   const name = process.env["BLOB_PRIVATE_CONTAINER_NAME"] ?? "data-private";
-  return svc.getContainerClient(name);
+  return getBlobServiceClient().getContainerClient(name);
 }
 
 async function listPureTrackGroupsForRound(roundId: string): Promise<PureTrackGroup[]> {

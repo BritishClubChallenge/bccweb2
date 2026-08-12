@@ -12,16 +12,44 @@ that includes the manufacturers API changes. The deploy switches the API to writ
 `manufacturers.json` to the public container going forward; this script performs the
 one-time promotion of the existing private copy.
 
+## Storage identity baseline
+
+Azure environment stamps unconditionally use the Function UMI as their workload identity
+with Shared Key disabled on both storage accounts; no identity or Shared Key toggle
+variables exist. The required per-environment `operator_principal_id` is the object ID of
+that environment's GitHub OIDC UMI for remote operator access. Local Azurite remains
+connection-string based. Production is not deployed and becomes secure by default only
+when first applied.
+
+The staging cutover is one `environment/staging` apply through the manual `terraform.yml`
+workflow (or locally) followed by an application redeploy; a brief interruption is
+acceptable. Roll back by `git revert`, re-applying, and redeploying the prior artifact,
+without manually changing the storage authentication model.
+
 ## Script
 
+Remote staging uses the invoking Entra identity, not a storage key or the Function UMI:
+
 ```bash
-node scripts/admin/move-manufacturers-to-public.mjs
+az login
+BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata" \
+  node scripts/admin/move-manufacturers-to-public.mjs
+```
+
+Persistent operator storage roles belong to the environment OIDC UMI. A local human needs a
+separately approved data-plane grant. For local Azurite, retain the explicit emulator
+path:
+
+```bash
+BLOB_CONNECTION_STRING="UseDevelopmentStorage=true" \
+  node scripts/admin/move-manufacturers-to-public.mjs
 ```
 
 Optional flag:
 
 ```bash
-node scripts/admin/move-manufacturers-to-public.mjs --force
+BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata" \
+  node scripts/admin/move-manufacturers-to-public.mjs --force
 ```
 
 `--force` overwrites a conflicting non-empty public list. Only required if a non-empty
@@ -32,7 +60,8 @@ the private source of truth.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BLOB_CONNECTION_STRING` | Azurite dev | Set to production storage connection string |
+| `BLOB_CONNECTION_STRING` | Azurite dev | Local emulator connection string; takes precedence and must not carry a remote account key |
+| `BLOB_STORAGE_ACCOUNT_NAME` | — | Remote data account; uses the invoking Entra identity |
 | `BLOB_CONTAINER_NAME` | `data` | Public container |
 | `BLOB_PRIVATE_CONTAINER_NAME` | `data-private` | Private container (source of truth) |
 
@@ -76,7 +105,8 @@ The script is **idempotent** — safe to run multiple times. It follows this seq
 After a successful run, append the script output to the evidence file:
 
 ```bash
-node scripts/admin/move-manufacturers-to-public.mjs \
+BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata" \
+  node scripts/admin/move-manufacturers-to-public.mjs \
   | tee -a .omo/evidence/task-11-manufacturers-reference-data.txt
 echo "EXIT: $?" >> .omo/evidence/task-11-manufacturers-reference-data.txt
 ```
@@ -86,7 +116,7 @@ echo "EXIT: $?" >> .omo/evidence/task-11-manufacturers-reference-data.txt
 After the move, verify the public container remains PII-free:
 
 ```bash
-node scripts/privacy-scan.mjs
+BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata" node scripts/privacy-scan.mjs
 ```
 
 The scanner must exit 0. `manufacturers.json` is safe in the public container because

@@ -27,9 +27,12 @@
  *   removeFromPublicIndex(path, idValue, keyField)
  */
 
-import { BlobServiceClient } from "@azure/storage-blob";
 import bcrypt from "bcryptjs";
 import { createHash } from "node:crypto";
+import {
+  createBlobServiceClient,
+  preflightBlobReadAccess,
+} from "./storageClients.mjs";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -41,19 +44,19 @@ const BCRYPT_COST = 12;
 let _blobService = null;
 let _publicContainer = null;
 let _privateContainer = null;
+let _connectionString;
 
 // ─── Clients ──────────────────────────────────────────────────────────────────
 
 /**
- * Returns a memoised BlobServiceClient. Uses BLOB_CONNECTION_STRING when set,
- * but falls back to the Azurite well-known string when missing or when the
- * configured CS still points at localhost (treat both as "dev mode").
+ * Returns a memoised BlobServiceClient. Explicit configuration wins; otherwise
+ * root-package fixture tooling retains its local Azurite default.
  */
 export function getBlobServiceClient() {
   if (_blobService) return _blobService;
-  const envCs = process.env.BLOB_CONNECTION_STRING;
-  const cs = envCs && !envCs.includes("localhost") ? envCs : AZURITE_DEFAULT_CS;
-  _blobService = BlobServiceClient.fromConnectionString(cs);
+  _connectionString = process.env.BLOB_CONNECTION_STRING ??
+    (process.env.BLOB_STORAGE_ACCOUNT_NAME ? undefined : AZURITE_DEFAULT_CS);
+  _blobService = createBlobServiceClient({ connectionString: _connectionString });
   return _blobService;
 }
 
@@ -71,6 +74,11 @@ export function getPrivateContainer() {
   return _privateContainer;
 }
 
+export function preflightBlobContainerRead(container) {
+  getBlobServiceClient();
+  return preflightBlobReadAccess({ container, connectionString: _connectionString });
+}
+
 // ─── Blob primitives ──────────────────────────────────────────────────────────
 
 /**
@@ -78,6 +86,7 @@ export function getPrivateContainer() {
  * Overwrites any existing blob.
  */
 export async function writeJson(container, path, obj) {
+  await preflightBlobContainerRead(container);
   const client = container.getBlockBlobClient(path);
   const body = JSON.stringify(obj, null, 2);
   const bytes = Buffer.from(body, "utf8");
@@ -112,6 +121,7 @@ export async function readJson(container, path) {
  * Re-run safe.
  */
 export async function deleteBlob(container, path) {
+  await preflightBlobContainerRead(container);
   const client = container.getBlobClient(path);
   await client.deleteIfExists();
 }

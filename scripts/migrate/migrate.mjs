@@ -11,6 +11,10 @@
  *   BLOB_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net" \
  *   node scripts/migrate/migrate.mjs [--dry-run] [--resume] [--force-production]
  *
+ * Or use the invoking operator/OIDC identity:
+ *   SQL_CONNECTION_STRING="..." BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata" \
+ *   node scripts/migrate/migrate.mjs [--dry-run] [--resume] [--force-production]
+ *
  * For local dev against Azurite:
  *   SQL_CONNECTION_STRING="..." \
  *   BLOB_CONNECTION_STRING="UseDevelopmentStorage=true" \
@@ -43,7 +47,6 @@
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import sql from "mssql";
-import { BlobServiceClient } from "@azure/storage-blob";
 // computeLeague is IMPORTED from @bccweb/scoring (not copied). Even though
 // scripts/migrate is a standalone package (own lockfile) it is run from the repo
 // checkout, so @bccweb/scoring resolves via the workspace root node_modules
@@ -58,6 +61,7 @@ import { writeNormalizationCounts } from "./normalization-counts.mjs";
 import { createTally, normalizeCoachType, normalizePilotRating, normalizeRoundStatus, normalizeScoringType, normalizeWingClass } from "./enum-normalize.mjs";
 import { assertSeasonYear, briefImageBlobFromLegacy, briefImagePath, ensureNonEmpty, normalizeWebsiteUrl, parseFrequencyMhz, manufacturerFromLegacyRow, legacySignaturePath, legacyMigratedSignature, pilotSummaryFromMigration } from "./transforms.mjs";
 import { legacyScoreManifestPath, writeLegacyScoreManifest } from "./legacy-score-manifest.mjs";
+import { createBlobServiceClient } from "./blobClient.mjs";
 
 // ─── CLI flags ────────────────────────────────────────────────────────────────
 
@@ -69,7 +73,6 @@ const FORCE_PRODUCTION = argv.includes("--force-production");
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const SQL_CS = process.env.SQL_CONNECTION_STRING;
-const BLOB_CS = process.env.BLOB_CONNECTION_STRING;
 const CONTAINER = process.env.BLOB_CONTAINER ?? "data";
 const PRIVATE_CONTAINER = process.env.BLOB_PRIVATE_CONTAINER ?? "data-private";
 
@@ -90,8 +93,7 @@ let privateContainerClient;
 
 function initBlobClients() {
   if (containerClient && privateContainerClient) return;
-  if (!BLOB_CS) throw new Error("Missing BLOB_CONNECTION_STRING env var");
-  const blobService = BlobServiceClient.fromConnectionString(BLOB_CS);
+  const blobService = createBlobServiceClient();
   containerClient = blobService.getContainerClient(CONTAINER);
   privateContainerClient = blobService.getContainerClient(PRIVATE_CONTAINER);
 }
@@ -215,7 +217,7 @@ async function safeQuery(pool, query) {
 
 async function main() {
   if (!SQL_CS) throw new Error("Missing SQL_CONNECTION_STRING env var");
-  if (!BLOB_CS) throw new Error("Missing BLOB_CONNECTION_STRING env var");
+  initBlobClients();
 
   if (/Server=tcp:.*bcc-prod/i.test(SQL_CS)) {
     if (!(FORCE_PRODUCTION && process.env.PRODUCTION_CONFIRM === "YES")) {

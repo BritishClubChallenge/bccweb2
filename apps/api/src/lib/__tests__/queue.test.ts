@@ -23,6 +23,7 @@ vi.mock("@azure/storage-queue", () => ({
 }));
 
 const QUEUE_CONN = "UseDevelopmentStorage=true;QueueEndpoint=http://127.0.0.1:10001/x;";
+const SECOND_QUEUE_CONN = "UseDevelopmentStorage=true;QueueEndpoint=http://127.0.0.1:10001/y;";
 
 describe("enqueueBriefPdf", () => {
   let savedEnv: { queue: string | undefined; blob: string | undefined };
@@ -72,10 +73,31 @@ describe("enqueueBriefPdf", () => {
     await enqueueBriefPdf({ roundId: "r2", briefVersion: 4, pdfAttemptId: "a2" });
     expect(QueueClientMock).toHaveBeenCalledTimes(1);
 
-    // resetQueueSingletons() forces a rebuild on the next enqueue.
+    process.env["AzureWebJobsStorage"] = SECOND_QUEUE_CONN;
     resetQueueSingletons();
     await enqueueBriefPdf({ roundId: "r3", briefVersion: 5, pdfAttemptId: "a3" });
     expect(QueueClientMock).toHaveBeenCalledTimes(2);
+    expect(QueueClientMock).toHaveBeenLastCalledWith(
+      SECOND_QUEUE_CONN,
+      "round-brief-pdf",
+    );
+  });
+
+  test("resets the shared storage-client seam", async () => {
+    // Given
+    const resetStorageClientSingletons = vi.fn();
+    vi.doMock("../storageClients.js", () => ({
+      getRuntimeQueueClient: vi.fn(),
+      resetStorageClientSingletons,
+    }));
+    const { resetQueueSingletons } = await import("../queue.js");
+
+    // When
+    resetQueueSingletons();
+
+    // Then
+    expect(resetStorageClientSingletons).toHaveBeenCalledOnce();
+    vi.doUnmock("../storageClients.js");
   });
 
   test("still targets the round-brief-pdf queue after queue-client caching changes", async () => {
@@ -87,7 +109,7 @@ describe("enqueueBriefPdf", () => {
     expect(QueueClientMock).toHaveBeenCalledWith(QUEUE_CONN, "round-brief-pdf");
   });
 
-  test("throws when AzureWebJobsStorage is unset — no BLOB_CONNECTION_STRING fallback", async () => {
+  test("requires runtime identity config when AzureWebJobsStorage is unset — no blob fallback", async () => {
     delete process.env["AzureWebJobsStorage"];
     process.env["BLOB_CONNECTION_STRING"] = "UseDevelopmentStorage=true;blob-only;";
 
@@ -95,7 +117,7 @@ describe("enqueueBriefPdf", () => {
 
     await expect(
       enqueueBriefPdf({ roundId: "r1", briefVersion: 3, pdfAttemptId: "a1" }),
-    ).rejects.toThrow(/AzureWebJobsStorage/);
+    ).rejects.toThrow(/RUNTIME_STORAGE_ACCOUNT_NAME/);
     expect(QueueClientMock).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
   });
@@ -176,14 +198,14 @@ describe("enqueueSignToFlyReflect", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  test("throws when AzureWebJobsStorage is unset — no BLOB_CONNECTION_STRING fallback", async () => {
+  test("requires runtime identity config when AzureWebJobsStorage is unset — no blob fallback", async () => {
     delete process.env["AzureWebJobsStorage"];
     process.env["BLOB_CONNECTION_STRING"] = "UseDevelopmentStorage=true;blob-only;";
 
     const { enqueueSignToFlyReflect } = await import("../queue.js");
 
     await expect(enqueueSignToFlyReflect({ roundId: "r1" })).rejects.toThrow(
-      /AzureWebJobsStorage/,
+      /RUNTIME_STORAGE_ACCOUNT_NAME/,
     );
     expect(QueueClientMock).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();

@@ -17,6 +17,7 @@
  *
  *   BLOB_CONNECTION_STRING       Azure/Azurite connection string
  *                                (default: Azurite dev — 127.0.0.1:10000)
+ *   BLOB_STORAGE_ACCOUNT_NAME    Remote data account (invoking Entra identity)
  *   BLOB_CONTAINER_NAME          public container  (default: "data")
  *   BLOB_PRIVATE_CONTAINER_NAME  private container (default: "data-private")
  *
@@ -47,10 +48,13 @@
  *   3  public write verification failed (read-back mismatch)
  */
 
-import { BlobServiceClient } from "@azure/storage-blob";
 import { ManufacturersIndexSchema } from "@bccweb/schemas";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import {
+  createBlobServiceClient,
+  preflightBlobReadAccess,
+} from "../lib/storageClients.mjs";
 
 const BLOB_NAME = "manufacturers.json";
 
@@ -98,16 +102,20 @@ export async function moveManufacturersToPublic({
   log = console.log,
   errlog = console.error,
 } = {}) {
-  const cs =
-    connectionString ?? process.env["BLOB_CONNECTION_STRING"] ?? AZURITE_DEV_CS;
+  const cs = connectionString ?? process.env["BLOB_CONNECTION_STRING"] ??
+    (process.env["BLOB_STORAGE_ACCOUNT_NAME"] ? undefined : AZURITE_DEV_CS);
   const pubName =
     publicContainer ?? process.env["BLOB_CONTAINER_NAME"] ?? "data";
   const privName =
     privateContainer ?? process.env["BLOB_PRIVATE_CONTAINER_NAME"] ?? "data-private";
 
-  const service = BlobServiceClient.fromConnectionString(cs);
+  const service = createBlobServiceClient({ connectionString: cs });
   const pub = service.getContainerClient(pubName);
   const priv = service.getContainerClient(privName);
+  await Promise.all([
+    preflightBlobReadAccess({ container: pub, connectionString: cs }),
+    preflightBlobReadAccess({ container: priv, connectionString: cs }),
+  ]);
 
   // ── 0. Read private (source of truth) ───────────────────────────────────────
   const privateRaw = await readBlobText(priv, BLOB_NAME);

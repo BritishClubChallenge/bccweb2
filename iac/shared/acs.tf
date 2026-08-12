@@ -100,6 +100,6 @@ output "acs_sender_address" {
 }
 
 output "acs_dns_records_for_operator" {
-  description = "ACS DNS records formatted for operator registrar setup."
+  description = "ACS DNS verification records for the operator to publish in the delegated Azure DNS zone (or registrar, if the email domain is not DNS-delegated to Azure)."
   value       = local.acs_dns_records_for_operator
 }

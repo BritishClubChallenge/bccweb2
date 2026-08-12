@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
-import { QueueClient } from "@azure/storage-queue";
+import {
+  createQueueClient,
+  preflightQueueReadAccess,
+  StorageRbacError,
+} from "./storageClients.mjs";
 
 const MAIN_QUEUE = "signtofly-reflect";
 const POISON_QUEUE = "signtofly-reflect-poison";
@@ -10,11 +14,13 @@ export const LOCAL_AZURITE_QUEUE_CONNECTION =
 export function resolveReflectQueueConnection(baseUrl, environment = process.env) {
   const configured = environment.AzureWebJobsStorage;
   if (typeof configured === "string" && configured.length > 0) return configured;
+  if (typeof environment.RUNTIME_STORAGE_ACCOUNT_NAME === "string" &&
+    environment.RUNTIME_STORAGE_ACCOUNT_NAME.length > 0) return undefined;
   const host = new URL(baseUrl).hostname.toLowerCase();
   if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
     return LOCAL_AZURITE_QUEUE_CONNECTION;
   }
-  fail("AzureWebJobsStorage is required for reflect queue verification");
+  fail("AzureWebJobsStorage or RUNTIME_STORAGE_ACCOUNT_NAME is required for reflect queue verification");
 }
 
 function fail(message) {
@@ -23,10 +29,10 @@ function fail(message) {
 
 export function createReflectQueueReader(options) {
   const { baseUrl = process.env.BCC_API_BASE_URL ?? "http://localhost:7071",
-    environment = process.env, queueClientFactory = (secret, name) => (
-    new QueueClient(secret, name)
-  ), requestTimeoutMs = 15_000,
-  abortSignalFactory = (timeoutMs) => AbortSignal.timeout(timeoutMs) } = options;
+    environment = process.env, queueClientFactory = (connectionString, name) => (
+      createQueueClient(name, { environment, connectionString })
+    ), requestTimeoutMs = 15_000,
+    abortSignalFactory = (timeoutMs) => AbortSignal.timeout(timeoutMs) } = options;
   const connectionString = resolveReflectQueueConnection(baseUrl, environment);
   const main = queueClientFactory(connectionString, MAIN_QUEUE);
   const poison = queueClientFactory(connectionString, POISON_QUEUE);
@@ -34,11 +40,16 @@ export function createReflectQueueReader(options) {
     let mainProperties;
     let poisonProperties;
     try {
+      await Promise.all([
+        preflightQueueReadAccess({ queue: main, environment, connectionString }),
+        preflightQueueReadAccess({ queue: poison, environment, connectionString }),
+      ]);
       [mainProperties, poisonProperties] = await Promise.all([
         main.getProperties({ abortSignal: abortSignalFactory(requestTimeoutMs) }),
         poison.getProperties({ abortSignal: abortSignalFactory(requestTimeoutMs) }),
       ]);
-    } catch {
+    } catch (error) {
+      if (error instanceof StorageRbacError) throw error;
       fail("reflect queue properties request failed; state preserved");
     }
     const mainCount = mainProperties.approximateMessagesCount;

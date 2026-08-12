@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
 import { createHash } from "node:crypto";
-import { BlobServiceClient, ContainerClient } from "@azure/storage-blob";
 import type { SignToFlyWording } from "@bccweb/types";
 import { ActiveWordingPointerSchema, SignToFlyWordingSchema } from "@bccweb/schemas";
 import {
@@ -11,6 +10,7 @@ import {
 } from "../blob.js";
 import { readJson } from "../blobJson.js";
 import { HttpError } from "../http.js";
+import { getBlobServiceClient } from "../storageClients.js";
 
 export interface ActiveWording {
   activeVersion: number;
@@ -18,8 +18,6 @@ export interface ActiveWording {
 
 const ACTIVE_WORDING_PATH = "sign-to-fly/wording/active.json";
 const WORDING_PREFIX = "sign-to-fly/wording/";
-
-let privateContainer: ContainerClient | null = null;
 
 export interface WordingVersionSummary {
   version: number;
@@ -243,14 +241,8 @@ function isLeaseAlreadyPresent(err: unknown): boolean {
   return storageErr.statusCode === 409;
 }
 
-function getPrivateContainer(): ContainerClient {
-  if (privateContainer) return privateContainer;
-  const connectionString = process.env["BLOB_CONNECTION_STRING"];
-  if (!connectionString) {
-    throw new Error("BLOB_CONNECTION_STRING environment variable is not set");
-  }
-  privateContainer = BlobServiceClient
-    .fromConnectionString(connectionString)
-    .getContainerClient(process.env["BLOB_PRIVATE_CONTAINER_NAME"] ?? "data-private");
-  return privateContainer;
+function getPrivateContainer() {
+  return getBlobServiceClient().getContainerClient(
+    process.env["BLOB_PRIVATE_CONTAINER_NAME"] ?? "data-private",
+  );
 }

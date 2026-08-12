@@ -27,6 +27,7 @@ resource "azapi_resource" "storage_runtime" {
     }
     properties = {
       allowBlobPublicAccess    = false
+      allowSharedKeyAccess     = false
       supportsHttpsTrafficOnly = true
       minimumTlsVersion        = "TLS1_2"
     }
@@ -40,6 +41,31 @@ resource "azapi_resource" "storage_runtime" {
       error_message = "Runtime storage account name must not exceed 24 characters."
     }
   }
+}
+
+# Live staging proved the parent body's allowSharedKeyAccess=false was not
+# written: ARM readback stayed unset and key auth succeeded after apply. This
+# explicit update performs the verified write; do not remove it as redundant.
+# Verify post-apply via ARM readback and rejected key auth, never config alone.
+resource "azapi_update_resource" "storage_runtime_shared_key" {
+  type        = "Microsoft.Storage/storageAccounts@2025-06-01"
+  resource_id = azapi_resource.storage_runtime.id
+
+  body = {
+    properties = {
+      allowSharedKeyAccess = false
+    }
+  }
+
+  depends_on = [
+    azapi_resource.fn_runtime_blob_owner_role,
+    azapi_resource.fn_runtime_queue_contributor_role,
+    azapi_resource.fn_runtime_table_contributor_role,
+    azapi_resource.fn_data_blob_contributor_role,
+    azapi_resource.operator_runtime_queue_contributor_role,
+    azapi_resource.operator_deployment_blob_contributor_role,
+    azapi_resource.operator_data_blob_contributor_role,
+  ]
 }
 
 # The runtime blob service intentionally has no versioning, CORS, change feed,
@@ -164,9 +190,6 @@ resource "azapi_resource" "queue_puretrack_group_poison" {
 
 # ─── Data Storage Account ────────────────────────────────────────────────────
 #
-# BLOB_CONNECTION_STRING targets this account. It owns both application blob
-# containers because the API accesses them through one BlobServiceClient.
-
 resource "azapi_resource" "storage_data" {
   type      = "Microsoft.Storage/storageAccounts@2025-06-01"
   name      = local.storage_account_name_data
@@ -181,6 +204,7 @@ resource "azapi_resource" "storage_data" {
     }
     properties = {
       allowBlobPublicAccess    = true
+      allowSharedKeyAccess     = false
       supportsHttpsTrafficOnly = true
       minimumTlsVersion        = "TLS1_2"
     }
@@ -194,6 +218,31 @@ resource "azapi_resource" "storage_data" {
       error_message = "Data storage account name must not exceed 24 characters."
     }
   }
+}
+
+# Live staging proved the parent body's allowSharedKeyAccess=false was not
+# written: ARM readback stayed unset and key auth succeeded after apply. This
+# explicit update performs the verified write; do not remove it as redundant.
+# Verify post-apply via ARM readback and rejected key auth, never config alone.
+resource "azapi_update_resource" "storage_data_shared_key" {
+  type        = "Microsoft.Storage/storageAccounts@2025-06-01"
+  resource_id = azapi_resource.storage_data.id
+
+  body = {
+    properties = {
+      allowSharedKeyAccess = false
+    }
+  }
+
+  depends_on = [
+    azapi_resource.fn_runtime_blob_owner_role,
+    azapi_resource.fn_runtime_queue_contributor_role,
+    azapi_resource.fn_runtime_table_contributor_role,
+    azapi_resource.fn_data_blob_contributor_role,
+    azapi_resource.operator_runtime_queue_contributor_role,
+    azapi_resource.operator_deployment_blob_contributor_role,
+    azapi_resource.operator_data_blob_contributor_role,
+  ]
 }
 
 # Prevent accidental deletion of production data. Non-production environments
@@ -276,31 +325,20 @@ resource "azapi_resource" "storage_container_data_private" {
   depends_on = [azapi_update_resource.blob_service_data]
 }
 
-# ─── Per-Account Keys ────────────────────────────────────────────────────────
+removed {
+  from = azapi_resource_action.storage_runtime_keys
 
-resource "azapi_resource_action" "storage_runtime_keys" {
-  type        = "Microsoft.Storage/storageAccounts@2025-06-01"
-  resource_id = azapi_resource.storage_runtime.id
-  action      = "listKeys"
-  method      = "POST"
-
-  response_export_values = ["keys"]
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "azapi_resource_action" "storage_data_keys" {
-  type        = "Microsoft.Storage/storageAccounts@2025-06-01"
-  resource_id = azapi_resource.storage_data.id
-  action      = "listKeys"
-  method      = "POST"
+removed {
+  from = azapi_resource_action.storage_data_keys
 
-  response_export_values = ["keys"]
-}
-
-locals {
-  storage_runtime_primary_key       = azapi_resource_action.storage_runtime_keys.output.keys[0].value
-  storage_data_primary_key          = azapi_resource_action.storage_data_keys.output.keys[0].value
-  storage_runtime_connection_string = "DefaultEndpointsProtocol=https;AccountName=${local.storage_account_name_runtime};AccountKey=${local.storage_runtime_primary_key};EndpointSuffix=core.windows.net"
-  storage_data_connection_string    = "DefaultEndpointsProtocol=https;AccountName=${local.storage_account_name_data};AccountKey=${local.storage_data_primary_key};EndpointSuffix=core.windows.net"
+  lifecycle {
+    destroy = false
+  }
 }
 
 # ─── Blob Lifecycle Management Policy ────────────────────────────────────────

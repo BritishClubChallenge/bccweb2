@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
 import { app, type InvocationContext } from "@azure/functions";
-import { BlobServiceClient, type ContainerClient } from "@azure/storage-blob";
+import type { ContainerClient } from "@azure/storage-blob";
 import { RoundSchema } from "@bccweb/schemas";
 
 import { getPrivateBlobClient } from "../lib/blob.js";
@@ -13,6 +13,7 @@ import { enqueuePureTrackGroupJob, PureTrackGroupJobSchema, type PureTrackGroupJ
 import { parsePureTrackRecord } from "../lib/puretrackRecord.js";
 import { getTelemetryClient } from "../lib/telemetry.js";
 import { redactObject } from "../lib/telemetryRedactor.js";
+import { getBlobServiceClient } from "../lib/storageClients.js";
 
 const MAX_DEQUEUE = 5;
 const FINAL_FAILURE_STATUSES = ["pending", "processing"] as const;
@@ -47,10 +48,8 @@ async function readRound(roundId: string) {
 }
 
 function getPrivateContainer(): ContainerClient {
-  const connectionString = process.env["BLOB_CONNECTION_STRING"];
-  if (!connectionString) throw new Error("BLOB_CONNECTION_STRING is not set");
   const containerName = process.env["BLOB_PRIVATE_CONTAINER_NAME"] ?? "data-private";
-  return BlobServiceClient.fromConnectionString(connectionString).getContainerClient(containerName);
+  return getBlobServiceClient().getContainerClient(containerName);
 }
 
 async function listRecordedGroups(roundId: string): Promise<readonly RecordedGroup[]> {

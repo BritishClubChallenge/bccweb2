@@ -3,11 +3,16 @@
 // DEV-ONLY: seeds 2 fixed QA users (admin, pilot) + 1 pilot record + supporting
 // club/site/season fixtures into Azurite for the F3 brief-lifecycle manual QA.
 // NOT for production. Hardcoded password "test1234!" + deterministic UUIDs.
-import { BlobServiceClient } from "@azure/storage-blob";
 import bcrypt from "bcryptjs";
-const CONN = process.env.BLOB_CONNECTION_STRING ?? "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;";
-const svc = BlobServiceClient.fromConnectionString(CONN);
+import { createBlobServiceClient, preflightBlobReadAccess } from "../lib/storageClients.mjs";
+const LOCAL_CONNECTION = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;";
+const connectionString = process.env.BLOB_CONNECTION_STRING ?? (process.env.BLOB_STORAGE_ACCOUNT_NAME ? undefined : LOCAL_CONNECTION);
+const svc = createBlobServiceClient({ connectionString });
 const pub = svc.getContainerClient("data"), priv = svc.getContainerClient("data-private");
+await Promise.all([
+  preflightBlobReadAccess({ container: pub, connectionString }),
+  preflightBlobReadAccess({ container: priv, connectionString }),
+]);
 const put = async (c, p, o) => { const b = JSON.stringify(o, null, 2); await c.getBlockBlobClient(p).upload(b, Buffer.byteLength(b), { blobHTTPHeaders: { blobContentType: "application/json" } }); };
 const A_ID = "11111111-1111-4111-8111-111111111111", P_ID = "22222222-2222-4222-8222-222222222222";
 const PILOT_ID = "33333333-3333-4333-8333-333333333333", CLUB_ID = "44444444-4444-4444-8444-444444444444";

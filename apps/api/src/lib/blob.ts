@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
-import {
+import type {
   BlobServiceClient,
   ContainerClient,
   BlobClient,
@@ -8,6 +8,10 @@ import {
 } from "@azure/storage-blob";
 import { getTelemetryClient } from "./telemetry.js";
 import { HttpError } from "./http.js";
+import {
+  getBlobServiceClient,
+  resetStorageClientSingletons,
+} from "./storageClients.js";
 
 // ─── Client singletons ────────────────────────────────────────────────────────
 
@@ -20,6 +24,7 @@ export function resetBlobSingletons(): void {
   _container = null;
   _privateContainer = null;
   _blobService = null;
+  resetStorageClientSingletons();
 }
 
 interface LeaseRenewingOptions {
@@ -39,11 +44,7 @@ export class LeaseRenewalFailedError extends Error {
 
 function getBlobService(): BlobServiceClient {
   if (_blobService) return _blobService;
-  const connectionString = process.env["BLOB_CONNECTION_STRING"];
-  if (!connectionString) {
-    throw new Error("BLOB_CONNECTION_STRING environment variable is not set");
-  }
-  _blobService = BlobServiceClient.fromConnectionString(connectionString);
+  _blobService = getBlobServiceClient();
   return _blobService;
 }
 

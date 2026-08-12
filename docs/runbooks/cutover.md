@@ -26,7 +26,7 @@ Then generate the reconciliation report with `scripts/migrate/reconcile.mjs` (ex
 - `report.perEntity` — `{ <entity>: { count, sample } }` for every `entity:` prefix found in the id-map keys (e.g. `pilot`, `round`, `club`, `site`). Compare each `count` against the legacy database's row count for that entity.
 - `report.anomalies` — an array of `{ type, message }`. The base run (no `--against-prod-snapshot`) can emit `duplicate_uuid` (the same UUID value reused across different id-map keys) or `malformed_key` (an id-map key missing its `entity:` prefix); running with `--against-prod-snapshot <path>` additionally compares expected vs. actual per-entity counts and can also emit `count_mismatch` for any entity that disagrees (see "Reconciliation" below). `reconcile.mjs` exits 1 and logs `Anomalies detected: <n>` when this array is non-empty, or logs `No anomalies detected.` and exits 0 when empty — treat exit code 0 / an empty `anomalies` array as the pass condition, not any legacy-status-normalization claim.
 
-Finally, run the privacy scanner against the dry-run output (if exported to a local Azurite instance) with `BLOB_CONNECTION_STRING="UseDevelopmentStorage=true" node scripts/migrate/validate.mjs` — it has no CLI flags; it reads its target entirely from the `BLOB_CONNECTION_STRING` env var (real storage account connection string, or the Azurite dev-storage shorthand shown here). The scanner must return a clean pass (exit code 0) to ensure no PII (emails, phone numbers, medical info) is leaked into the public `data` container.
+Finally, run the privacy scanner against the dry-run output (if exported to a local Azurite instance) with `BLOB_CONNECTION_STRING="UseDevelopmentStorage=true" node scripts/migrate/validate.mjs` — it has no CLI flags; `BLOB_CONNECTION_STRING` wins when set (the Azurite dev-storage shorthand shown here, or a connection string against a Shared-Key-enabled account), otherwise it falls back to `BLOB_STORAGE_ACCOUNT_NAME` + the invoking identity's `DefaultAzureCredential` (see the "Validation" section below for that remote form). The scanner must return a clean pass (exit code 0) to ensure no PII (emails, phone numbers, medical info) is leaked into the public `data` container.
 
 ## Reconciliation
 
@@ -60,10 +60,21 @@ Validation ensures the newly written blobs are accessible by the API and correct
 
 Run the production validation:
 ```bash
-# Verify public blob accessibility and PII redaction (no CLI flags — target
-# is set entirely via BLOB_CONNECTION_STRING; make build first, since this
-# validator imports @bccweb/schemas from its built dist/):
-BLOB_CONNECTION_STRING="<production storage account connection string>" \
+# Verify public blob accessibility and PII redaction (no CLI flags. Target
+# resolution: BLOB_CONNECTION_STRING wins when set; otherwise
+# BLOB_STORAGE_ACCOUNT_NAME + the invoking identity's DefaultAzureCredential.
+# Storage stamps are secure by default with Shared Key disabled, so use the
+# identity form below against stbccwebproddata: run `az login` first — this
+# requires a separately approved data-plane role grant for your account;
+# persistent remote access belongs to the environment's GitHub OIDC/Terraform
+# UMI, not a human's standing permissions — or rely on CI's OIDC identity.
+# make build first, since this validator imports @bccweb/schemas from its
+# built dist/):
+BLOB_STORAGE_ACCOUNT_NAME="stbccwebproddata" \
+  node scripts/migrate/validate.mjs
+
+# Local/Azurite form (still fully supported — this is how developers run it):
+BLOB_CONNECTION_STRING="UseDevelopmentStorage=true" \
   node scripts/migrate/validate.mjs
 
 # Smoke-check the deployed API the same way deploy-prod.yml's post-deploy
@@ -95,7 +106,7 @@ DNS cutover moves public traffic from the legacy hostname to the new bccweb2 Azu
 
 The detailed runbook (TTL strategy, SPF/DKIM/DMARC verification, manual-vs-Terraform CNAME path, validation script, rollback) lives at `docs/runbooks/dns-cutover.md`. The short version:
 
-1. **ACS Email Domain**: Execute the DNS verification in the registrar using the lowercase operator records provided by `terraform -chdir=iac/shared output acs_dns_records_for_operator` (`domain_ownership`, `spf`, `dkim`, `dkim2`, and `dmarc`, each carrying Azure's `type`, `name`, and `value`). Publish DMARC with `p=none` for first cutover — tighten after one clean week. Confirm verification in the Azure Portal, then set `link_acs_email_domain = true` in the committed shared tfvars and run the reviewed shared Terraform apply before treating outbound mail as enabled.
+1. **ACS Email Domain**: Publish the lowercase operator records provided by `terraform -chdir=iac/shared output acs_dns_records_for_operator` (`domain_ownership`, `spf`, `dkim`, `dkim2`, each carrying Azure's `type`, `name`, and `value` — and `dmarc`, an operator-authored deliverability record ACS often returns as `null` rather than an ACS-verified value) into the delegated Azure DNS child zone `email.matt-ffffff.com` (resource group `rg-dns`) — GoDaddy only holds the NS delegation for that subdomain, so these records never go at the registrar; see `docs/runbooks/dns-cutover.md` for the exact `az network dns record-set` commands, including the name-normalization helper and the `dmarc`-is-`null` fallback. Publish DMARC with `p=none` for first cutover — tighten after one clean week. Confirm verification in the Azure Portal, then set `link_acs_email_domain = true` in the committed shared tfvars and run the reviewed shared Terraform apply before treating outbound mail as enabled. If `acs_sender_address` changed, also apply `staging` and `prod` afterward so `ACS_SENDER_ADDRESS` propagates to both Function Apps (see `docs/runbooks/dns-cutover.md`).
 2. **CNAME Update**: Derive the SWA default host from `terraform -chdir=iac/shared output -raw swa_default_hostname`. There is one Static Web App shared across the whole topology (`swa-bccweb-shared`), so it is not created per environment. When both `production_hostname` and `dns_zone_name` are set, Terraform owns the CNAME via `iac/shared/dns.tf`; follow the managed path in `docs/runbooks/dns-cutover.md`. Otherwise, update the registrar and use `swa_default_hostname` as the target.
 3. **TTL Strategy**: 24h before cutover lower TTL to 300s; flip target at 300s; raise back to 3600s 24h after stable traffic. See `docs/runbooks/dns-cutover.md` for the full schedule.
 4. **Validation**: run `PROD_HOST=... SWA_HOST=... API_HOST=... ACS_EMAIL_DOMAIN=... bash scripts/iac/validate-dns.sh` and capture the output to `.omo/evidence/task-51-dns.txt`.

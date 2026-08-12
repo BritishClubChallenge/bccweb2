@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-FileCopyrightText: 2026 British Club Challenge authors
 # SPDX-License-Identifier: MPL-2.0
+#
+# Usage (connection-string mode):
+#   PROD_DRY_RUN_CONFIRM=YES PROD_SQL_CONN='...' STAGING_BLOB_CONN='...' \
+#     scripts/migrate/dry-run-against-prod.sh
+# Usage (operator/OIDC identity mode):
+#   PROD_DRY_RUN_CONFIRM=YES PROD_SQL_CONN='...' STAGING_BLOB_ACCOUNT='accountname' \
+#     scripts/migrate/dry-run-against-prod.sh
+#
+# STAGING_BLOB_CONN takes precedence when both staging target variables are set.
+# Use --print-config to validate the selected downstream configuration without
+# contacting SQL or Azure; connection strings are masked in this output.
 
 set -euo pipefail
 
@@ -33,26 +44,84 @@ require_env() {
   fi
 }
 
+with_staging_blob_auth() {
+  if [[ -n "${STAGING_BLOB_CONN:-}" ]]; then
+    env -u BLOB_STORAGE_ACCOUNT_NAME BLOB_CONNECTION_STRING="$STAGING_BLOB_CONN" "$@"
+  else
+    env -u BLOB_CONNECTION_STRING BLOB_STORAGE_ACCOUNT_NAME="$STAGING_BLOB_ACCOUNT" "$@"
+  fi
+}
+
+print_config() {
+  local selected_config target
+  if [[ -n "${STAGING_BLOB_CONN:-}" ]]; then
+    target="$(mask_connection_string "$STAGING_BLOB_CONN")"
+    selected_config="$(with_staging_blob_auth node -e '
+      const connection = Reflect.get(process.env, "BLOB_CONNECTION_STRING");
+      const account = Reflect.get(process.env, "BLOB_STORAGE_ACCOUNT_NAME");
+      if (!connection || account) process.exit(1);
+      process.stdout.write("BLOB_CONNECTION_STRING=" + process.argv[1] + "; BLOB_STORAGE_ACCOUNT_NAME=<unset>");
+    ' "$target")"
+    printf 'Selected staging auth: connection string (STAGING_BLOB_CONN precedence)\n'
+    printf 'Container setup env: %s\n' "$selected_config"
+    printf 'Migration env: %s\n' "$selected_config"
+    printf 'Privacy scan: --source %s; BLOB_STORAGE_ACCOUNT_NAME=<unset>\n' "$target"
+  else
+    selected_config="$(with_staging_blob_auth node -e '
+      const connection = Reflect.get(process.env, "BLOB_CONNECTION_STRING");
+      const account = Reflect.get(process.env, "BLOB_STORAGE_ACCOUNT_NAME");
+      if (connection || !account) process.exit(1);
+      process.stdout.write("BLOB_STORAGE_ACCOUNT_NAME=" + account + "; BLOB_CONNECTION_STRING=<unset>");
+    ')"
+    printf 'Selected staging auth: identity (DefaultAzureCredential)\n'
+    printf 'Container setup env: %s\n' "$selected_config"
+    printf 'Migration env: %s\n' "$selected_config"
+    printf 'Privacy scan env: %s; --source omitted\n' "$selected_config"
+  fi
+}
+
+PRINT_CONFIG=false
+if [[ "${1:-}" == "--print-config" ]]; then
+  PRINT_CONFIG=true
+  shift
+fi
+if (( $# > 0 )); then
+  fail "unexpected argument: $1"
+fi
+
+if [[ -z "${STAGING_BLOB_CONN:-}" && -z "${STAGING_BLOB_ACCOUNT:-}" ]]; then
+  fail "staging blob target requires STAGING_BLOB_CONN or STAGING_BLOB_ACCOUNT"
+fi
+
+if [[ "$PRINT_CONFIG" == true ]]; then
+  print_config
+  exit 0
+fi
+
 if [[ "${PROD_DRY_RUN_CONFIRM:-}" != "YES" ]]; then
   fail "refusing production dry-run unless PROD_DRY_RUN_CONFIRM=YES"
 fi
 
 require_env PROD_SQL_CONN
-require_env STAGING_BLOB_CONN
 
 mkdir -p "$STATE_DIR"
 
-STAGING_BLOB_CONN="$STAGING_BLOB_CONN" PUBLIC_CONTAINER="$PUBLIC_CONTAINER" PRIVATE_CONTAINER="$PRIVATE_CONTAINER" node --input-type=module - <<'NODE'
-import { BlobServiceClient } from "@azure/storage-blob";
+(cd scripts/migrate && with_staging_blob_auth env PUBLIC_CONTAINER="$PUBLIC_CONTAINER" PRIVATE_CONTAINER="$PRIVATE_CONTAINER" node --input-type=module - <<'NODE'
+import { createBlobServiceClient } from "./blobClient.mjs";
 
-const svc = BlobServiceClient.fromConnectionString(process.env.STAGING_BLOB_CONN);
+const svc = createBlobServiceClient();
 await svc.getContainerClient(process.env.PUBLIC_CONTAINER).createIfNotExists({ access: "blob" });
 await svc.getContainerClient(process.env.PRIVATE_CONTAINER).createIfNotExists();
 NODE
+)
 
 printf '=== BCC production migration dry-run ===\n'
 printf 'SQL source: %s\n' "$(mask_connection_string "$PROD_SQL_CONN")"
-printf 'Staging blob target: %s\n' "$(mask_connection_string "$STAGING_BLOB_CONN")"
+if [[ -n "${STAGING_BLOB_CONN:-}" ]]; then
+  printf 'Staging blob target: %s\n' "$(mask_connection_string "$STAGING_BLOB_CONN")"
+else
+  printf 'Staging blob target: account=%s (DefaultAzureCredential)\n' "$STAGING_BLOB_ACCOUNT"
+fi
 if [[ -n "${PROD_BLOB_CONN:-}" ]]; then
   printf 'Production blob comparison: %s\n' "$(mask_connection_string "$PROD_BLOB_CONN")"
 else
@@ -96,13 +165,17 @@ else
   printf 'No BACPAC_PATH provided; using PROD_SQL_CONN read-only snapshot/source.\n'
 fi
 
-printf 'Step 3/6: running migrate.mjs --dry-run --force-production against staging blob connection...\n'
-SQL_CONNECTION_STRING="$PROD_SQL_CONN" \
-BLOB_CONNECTION_STRING="$STAGING_BLOB_CONN" \
-BLOB_CONTAINER="$PUBLIC_CONTAINER" \
-BLOB_PRIVATE_CONTAINER="$PRIVATE_CONTAINER" \
-PRODUCTION_CONFIRM=YES \
-node scripts/migrate/migrate.mjs --dry-run --force-production > "$STDOUT_PATH"
+if [[ -n "${STAGING_BLOB_CONN:-}" ]]; then
+  printf 'Step 3/6: running migrate.mjs --dry-run --force-production against staging blob connection...\n'
+else
+  printf 'Step 3/6: running migrate.mjs --dry-run --force-production against staging blob account...\n'
+fi
+with_staging_blob_auth env \
+  SQL_CONNECTION_STRING="$PROD_SQL_CONN" \
+  BLOB_CONTAINER="$PUBLIC_CONTAINER" \
+  BLOB_PRIVATE_CONTAINER="$PRIVATE_CONTAINER" \
+  PRODUCTION_CONFIRM=YES \
+  node scripts/migrate/migrate.mjs --dry-run --force-production > "$STDOUT_PATH"
 printf 'Migration dry-run stdout captured at %s\n' "$STDOUT_PATH"
 
 printf 'Step 4/6: building production snapshot / expected-counts input...\n'
@@ -247,7 +320,11 @@ PROD_SQL_CONN="$PROD_SQL_CONN" PROD_BLOB_CONN="${PROD_BLOB_CONN:-}" \
 node scripts/migrate/reconcile.mjs --against-prod-snapshot "$PROD_SNAPSHOT_PATH"
 
 printf 'Step 6/6: running privacy-scan.mjs against staging public blobs...\n'
-BLOB_CONTAINER_NAME="$PUBLIC_CONTAINER" node scripts/privacy-scan.mjs --source "$STAGING_BLOB_CONN"
+if [[ -n "${STAGING_BLOB_CONN:-}" ]]; then
+  BLOB_CONTAINER_NAME="$PUBLIC_CONTAINER" node scripts/privacy-scan.mjs --source "$STAGING_BLOB_CONN"
+else
+  with_staging_blob_auth env BLOB_CONTAINER_NAME="$PUBLIC_CONTAINER" node scripts/privacy-scan.mjs
+fi
 
 printf '\n=== Production dry-run summary ===\n'
 node --input-type=module - <<'NODE'

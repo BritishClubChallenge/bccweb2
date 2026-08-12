@@ -32,6 +32,9 @@ Before this ships to prod, a one-time migration (see [`scripts/migrate`](../../s
 must **scan every affected blob and rewrite any alias-form value to its canonical
 value** using the tables below. Run it against a snapshot first
 (`scripts/migrate/dry-run-against-prod.sh`) and report counts of rewrites per field.
+Set `STAGING_BLOB_CONN` for connection-string targets or `STAGING_BLOB_ACCOUNT` for
+operator/OIDC identity authentication; the connection string takes precedence if both
+are set.
 
 If prod data is already fully canonical (likely, post initial migration), the
 migration is a no-op verification — but that must be **confirmed with a scan**, not

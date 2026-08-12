@@ -31,6 +31,7 @@
  *
  * Env (all optional, sensible Azurite defaults):
  *   BLOB_CONNECTION_STRING          Azurite/Azure connection string
+ *   BLOB_STORAGE_ACCOUNT_NAME       Remote data account (uses invoking Entra identity)
  *   BLOB_PRIVATE_CONTAINER_NAME     Defaults to "data-private"
  */
 

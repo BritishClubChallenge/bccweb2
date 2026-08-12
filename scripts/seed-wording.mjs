@@ -1,21 +1,20 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
-import { BlobServiceClient } from "@azure/storage-blob";
 import {
   ACTIVE_WORDING_PATH,
   WORDING_PATH,
   activeWordingPointer,
   buildCanonicalSignToFlyWording,
 } from "./lib/loadTestWording.mjs";
-
-const connectionString = process.env["BLOB_CONNECTION_STRING"];
-if (!connectionString) {
-  throw new Error("BLOB_CONNECTION_STRING environment variable is not set");
-}
+import {
+  createBlobServiceClient,
+  preflightBlobReadAccess,
+} from "./lib/storageClients.mjs";
 
 const containerName = process.env["BLOB_PRIVATE_CONTAINER_NAME"] ?? "data-private";
-const container = BlobServiceClient.fromConnectionString(connectionString)
+const container = createBlobServiceClient()
   .getContainerClient(containerName);
+await preflightBlobReadAccess({ container });
 await container.createIfNotExists();
 const wording = buildCanonicalSignToFlyWording(new Date().toISOString());
 

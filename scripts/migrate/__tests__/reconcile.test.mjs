@@ -103,6 +103,30 @@ describe("reconcile.mjs", () => {
     );
   });
 
+  test("reports an account-name Blob target without credentials", () => {
+    const cwd = makeWorkspace();
+    writeJson(join(cwd, ".migration-state", "id-map.json"), {
+      "club:1": "club-uuid-1",
+    });
+    const snapshotPath = join(cwd, ".migration-state", "snapshot.json");
+    writeJson(snapshotPath, { expectedCounts: { club: 1 } });
+
+    const result = runReconcile(cwd, ["--against-prod-snapshot", snapshotPath], {
+      PROD_BLOB_CONN: "",
+      BLOB_CONNECTION_STRING: "",
+      BLOB_STORAGE_ACCOUNT_NAME: "stbccwebstagingdata",
+    });
+
+    assert.equal(result.status, 0);
+    const report = JSON.parse(
+      readFileSync(join(cwd, ".migration-state", "prod-dryrun-report.json"), "utf8"),
+    );
+    assert.equal(
+      report.source.blobConn,
+      "https://stbccwebstagingdata.blob.core.windows.net",
+    );
+  });
+
   test("--discarded-counts integration (T32)", () => {
     const cwd = makeWorkspace();
     writeJson(join(cwd, ".migration-state", "id-map.json"), {
