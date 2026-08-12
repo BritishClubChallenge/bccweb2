@@ -20,10 +20,6 @@ resource "azapi_resource" "storage_runtime" {
   location  = var.location
   tags      = var.tags
 
-  # Azure omits allowSharedKeyAccess from GET until it is explicitly set, so
-  # AzAPI's permissive default would silently discard the configured false.
-  ignore_missing_property = false
-
   body = {
     kind = "StorageV2"
     sku = {
@@ -45,6 +41,31 @@ resource "azapi_resource" "storage_runtime" {
       error_message = "Runtime storage account name must not exceed 24 characters."
     }
   }
+}
+
+# Live staging proved the parent body's allowSharedKeyAccess=false was not
+# written: ARM readback stayed unset and key auth succeeded after apply. This
+# explicit update performs the verified write; do not remove it as redundant.
+# Verify post-apply via ARM readback and rejected key auth, never config alone.
+resource "azapi_update_resource" "storage_runtime_shared_key" {
+  type        = "Microsoft.Storage/storageAccounts@2025-06-01"
+  resource_id = azapi_resource.storage_runtime.id
+
+  body = {
+    properties = {
+      allowSharedKeyAccess = false
+    }
+  }
+
+  depends_on = [
+    azapi_resource.fn_runtime_blob_owner_role,
+    azapi_resource.fn_runtime_queue_contributor_role,
+    azapi_resource.fn_runtime_table_contributor_role,
+    azapi_resource.fn_data_blob_contributor_role,
+    azapi_resource.operator_runtime_queue_contributor_role,
+    azapi_resource.operator_deployment_blob_contributor_role,
+    azapi_resource.operator_data_blob_contributor_role,
+  ]
 }
 
 # The runtime blob service intentionally has no versioning, CORS, change feed,
@@ -176,10 +197,6 @@ resource "azapi_resource" "storage_data" {
   location  = var.location
   tags      = var.tags
 
-  # Azure omits allowSharedKeyAccess from GET until it is explicitly set, so
-  # AzAPI's permissive default would silently discard the configured false.
-  ignore_missing_property = false
-
   body = {
     kind = "StorageV2"
     sku = {
@@ -201,6 +218,31 @@ resource "azapi_resource" "storage_data" {
       error_message = "Data storage account name must not exceed 24 characters."
     }
   }
+}
+
+# Live staging proved the parent body's allowSharedKeyAccess=false was not
+# written: ARM readback stayed unset and key auth succeeded after apply. This
+# explicit update performs the verified write; do not remove it as redundant.
+# Verify post-apply via ARM readback and rejected key auth, never config alone.
+resource "azapi_update_resource" "storage_data_shared_key" {
+  type        = "Microsoft.Storage/storageAccounts@2025-06-01"
+  resource_id = azapi_resource.storage_data.id
+
+  body = {
+    properties = {
+      allowSharedKeyAccess = false
+    }
+  }
+
+  depends_on = [
+    azapi_resource.fn_runtime_blob_owner_role,
+    azapi_resource.fn_runtime_queue_contributor_role,
+    azapi_resource.fn_runtime_table_contributor_role,
+    azapi_resource.fn_data_blob_contributor_role,
+    azapi_resource.operator_runtime_queue_contributor_role,
+    azapi_resource.operator_deployment_blob_contributor_role,
+    azapi_resource.operator_data_blob_contributor_role,
+  ]
 }
 
 # Prevent accidental deletion of production data. Non-production environments
