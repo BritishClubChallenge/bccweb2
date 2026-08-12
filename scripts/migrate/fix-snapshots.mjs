@@ -11,8 +11,12 @@
  * detects those UUID values and replaces them with the correct name.
  *
  * Usage:
- *   node scripts/migrate/fix-snapshots.mjs           # dry-run (default — no writes)
- *   node scripts/migrate/fix-snapshots.mjs --apply   # apply changes
+ *   BLOB_CONNECTION_STRING="UseDevelopmentStorage=true" node scripts/migrate/fix-snapshots.mjs           # dry-run (default — no writes)
+ *   BLOB_CONNECTION_STRING="UseDevelopmentStorage=true" node scripts/migrate/fix-snapshots.mjs --apply   # apply changes
+ *
+ * Or use the invoking operator/OIDC identity:
+ *   BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata" node scripts/migrate/fix-snapshots.mjs           # dry-run (default — no writes)
+ *   BLOB_STORAGE_ACCOUNT_NAME="stbccwebstagingdata" node scripts/migrate/fix-snapshots.mjs --apply   # apply changes
  *
  * Idempotent: running twice always produces "0 fixes needed" on the second run.
  */

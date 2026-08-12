@@ -16,6 +16,9 @@ override_data {
       app_insights_ids = {
         unit = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-bccweb-shared/providers/Microsoft.Insights/components/appi-bccweb-unit"
       }
+      env_umi_principal_ids = {
+        unit = "00000000-0000-0000-0000-000000000006"
+      }
       acs_id             = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-bccweb-shared/providers/Microsoft.Communication/communicationServices/acs-bccweb-shared"
       acs_sender_address = "noreply@mail.example.test"
     }
@@ -41,7 +44,6 @@ variables {
   stamp_rg_name                = "rg-bccweb-unit"
   tfstate_resource_group_name  = "rg-bccweb-tfstate"
   tfstate_storage_account_name = "stbccwebtfstate"
-  operator_principal_id        = "00000000-0000-0000-0000-000000000006"
   ops_email                    = "ops@example.test"
   puretrack_api_key            = "TEST_PT_KEY_SENTINEL"
   puretrack_email              = "TEST_PT_EMAIL@example.test"
