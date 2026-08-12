@@ -678,6 +678,26 @@ test("migration smoke: schema gate validates migrated blobs", { skip: SCHEMA_GAT
   console.log(`\n[validate.mjs stdout]\n${r.stdout.trim()}\n[/validate.mjs stdout]`);
 });
 
+test("migration smoke: validate SKIPS legacy-score preservation when local manifest is absent", { skip: SCHEMA_GATE_SKIP }, () => {
+  const manifestPath = join(tmpDir, ".migration-state", "legacy-score-manifest.json");
+  const originalManifest = readFileSync(manifestPath, "utf8");
+
+  try {
+    rmSync(manifestPath);
+    const withoutManifest = runValidate();
+    assert.equal(
+      withoutManifest.status,
+      0,
+      `validate must not fail when local migration state is absent:\nSTDOUT:\n${withoutManifest.stdout}\nSTDERR:\n${withoutManifest.stderr}`,
+    );
+    assert.match(withoutManifest.stdout, /⊘  legacy-score manifest not present — skipping legacy-score preservation check/);
+    assert.match(withoutManifest.stdout, /Skipped: 1/);
+    assert.match(withoutManifest.stdout, /Migration validation PASSED with SKIPS/);
+  } finally {
+    writeFileSync(manifestPath, originalManifest, "utf8");
+  }
+});
+
 test("migration smoke: validate FAILS on perturbed manifest value and on missing legacyId", { skip: SCHEMA_GATE_SKIP }, async () => {
   const manifestPath = join(tmpDir, ".migration-state", "legacy-score-manifest.json");
   const originalManifest = readFileSync(manifestPath, "utf8");
