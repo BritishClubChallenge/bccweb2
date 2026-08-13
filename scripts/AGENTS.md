@@ -47,8 +47,12 @@ Azurite-only Shared Key REST bootstrap and deliberately does not use the adapter
 
 For the staging cutover, run one `environment/staging` apply through the manual
 `terraform.yml` workflow (or locally), then redeploy through the existing staging deploy
-path; a brief interruption is expected. Roll back with `git revert`, re-apply, and redeploy
-the prior artifact. This is the complete operator procedure.
+path; a brief interruption is expected. A plain `git revert` of the secure-storage change
+is not a safe rollback — Azure does not reset `allowSharedKeyAccess` just because
+Terraform stops managing it. The correct procedure re-enables Shared Key deliberately
+(the same explicit `azapi_update_resource` mechanism used to disable it) before restoring
+key-based Function settings and redeploying the prior artifact — see
+[../iac/README.md](../iac/README.md#staging-storage-cutover-and-rollback).
 
 ## `privacy-scan.mjs` — CI success gate
 
