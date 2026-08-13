@@ -36,6 +36,19 @@ jobs:
       - name: Typecheck
         run: make typecheck
 
+  # ── Dependency audit ──────────────────────────────────────────────────────────
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Node with mise
+        uses: ./.github/actions/setup-node-mise
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
   # ── Lint ──────────────────────────────────────────────────────────────────────
   # Repo-wide ESLint: per-workspace lint scripts (npm run lint --workspaces --if-present)
   # plus root eslint for tests/e2e + scripts. Build shared packages first so the
