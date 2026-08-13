@@ -95,12 +95,15 @@ Staging cutover is a single `terraform apply` through the manual `terraform.yml`
 or a local apply, followed by a redeploy. A brief staging interruption during cutover is
 acceptable.
 
-Rollback is a `git revert` of the secure-storage change, one re-apply, and a redeploy of
-the prior artifact. `storage-rbac.tf` was added by this change, so the revert removes it
-and destroys all seven role assignments; rolling forward again re-creates them, subject to
-Azure RBAC propagation delay. No data or storage topology is removed. See
-[../README.md](../README.md#staging-storage-cutover-and-rollback) for the full procedure
-and the 403/propagation guidance.
+A plain `git revert` of the secure-storage change is **not** a safe rollback: it stops
+Terraform from managing `allowSharedKeyAccess`, but Azure does not reset that property to
+`true` just because nothing manages it, while the reverted Function settings switch back
+to key-based connection strings — so the app is left with keys against accounts that
+still reject Shared Key. The correct rollback re-enables Shared Key deliberately (a
+forward-fix `azapi_update_resource`, applied before or with the connection-string
+restore) and never needs to touch application code, since the storage client seams are
+dual-mode. See [../README.md](../README.md#staging-storage-cutover-and-rollback) for the
+full procedure and the 403/propagation guidance.
 
 **Precedence note**: `-var-file` values always override `TF_VAR_*`
 environment variables for the same variable name, and a later `-var-file`

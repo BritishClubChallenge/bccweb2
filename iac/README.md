@@ -203,15 +203,43 @@ cutover is one `terraform apply`, either through the manual `terraform.yml` work
 locally, followed by a redeploy of the application. A brief staging interruption during
 the cutover is acceptable.
 
-Rollback is source-driven and has one procedure: `git revert` the secure-storage change,
-re-apply, and redeploy the prior artifact. `storage-rbac.tf` was added by this change, so
-reverting it deletes the file and the next apply destroys all seven role assignments.
-Rolling forward again re-creates them and is subject to Azure RBAC propagation delay, same
-as the first apply.
+**A plain `git revert` of the secure-storage change is not a safe rollback.** It was
+tested against this history and found dangerous: removing `storage-rbac.tf` and the
+`azapi_update_resource` blocks in `storage.tf` stops Terraform from *managing*
+`allowSharedKeyAccess`, but Azure does not reset the property to its prior value just
+because nothing manages it any more — the account simply keeps its current value, which
+is `false`. Meanwhile the reverted `functions.tf` restores `AzureWebJobsStorage` and
+`BLOB_CONNECTION_STRING` as account-key connection strings and reverts the Flex
+deployment to `type = "StorageAccountConnectionString"`. Applying that combination hands
+the Function App key-based credentials against accounts that reject Shared Key — the
+app cannot reach storage, and the deployment step that uploads the package over that
+same connection string fails too.
 
-No data and no storage topology is removed by this rollback; the only thing it removes is
-the role assignments, which roll-forward restores. A fresh role assignment can return 403
-until Azure propagation completes; wait and retry rather than weakening scopes.
+The correct rollback is a **forward fix, not a revert**, and order matters:
+
+1. Add an explicit `azapi_update_resource` (the same mechanism `storage.tf` already
+   uses to disable Shared Key, since the parent `azapi_resource` body demonstrably does
+   not reach Azure on its own) that sets `allowSharedKeyAccess = true` on both storage
+   accounts, and apply it **before or together with** any change that hands the Function
+   App key-based settings.
+2. Only once both accounts accept Shared Key, restore the connection-string app settings
+   and the `StorageAccountConnectionString` deployment type, and redeploy the prior
+   artifact.
+3. If rolling back the identity/RBAC portion too, `storage-rbac.tf` was added by that
+   change, so removing it deletes the file and the next apply destroys all seven role
+   assignments. Rolling forward again re-creates them and is subject to Azure RBAC
+   propagation delay, same as the first apply.
+
+**Application code never needs reverting.** The storage seams
+(`apps/api/src/lib/storageClients.ts`, `scripts/lib/storageClients.mjs`,
+`scripts/migrate/blobClient.mjs`) are dual-mode: they use a connection string when one is
+configured and an account name plus managed identity otherwise. Rollback is purely an
+infrastructure operation.
+
+No data and no storage topology is removed by this rollback; the only thing the
+RBAC-removal step above removes is the role assignments, which roll-forward restores. A
+fresh role assignment can return 403 until Azure propagation completes; wait and retry
+rather than weakening scopes.
 
 ## Secret Rotation
 

@@ -287,9 +287,12 @@ pre-check that `terraform-run.yml` used to run. Secrets flow only through the wo
 The staging storage cutover is deliberately simple: run one `environment/staging` apply
 through the manual `terraform.yml` workflow (or the equivalent local apply), then redeploy
 the application through the existing `deploy-staging.yml` → `deploy-app.yml` path. A brief
-staging interruption between apply and redeploy is acceptable and expected. Rollback is a
-`git revert` of the secure-storage change, followed by one re-apply and redeployment of the
-prior artifact. This is the complete cutover and rollback procedure.
+staging interruption between apply and redeploy is acceptable and expected. A plain
+`git revert` of the secure-storage change is not a safe rollback — Azure does not
+reset `allowSharedKeyAccess` just because Terraform stops managing it, so the correct
+procedure re-enables Shared Key deliberately before restoring key-based Function
+settings. See [iac/README.md](iac/README.md#staging-storage-cutover-and-rollback) for
+the full procedure.
 
 CI (`.github/workflows/`) is DRY: three composite actions (`.github/actions/{setup-node-mise,
 azurite,tf-setup}`) plus two reusable workflows (`deploy-app.yml`, `terraform-run.yml`) that the

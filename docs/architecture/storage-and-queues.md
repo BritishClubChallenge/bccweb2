@@ -80,9 +80,17 @@ account's `deploymentpackage` container. Its post-deploy API smoke exercises app
 blob access, registered queue triggers continuously exercise runtime queues, and
 `privacy-scan.yml` remains the dedicated public-container PII gate.
 
-Rollback is source-driven: `git revert` the secure-storage change, re-apply the reverted
-environment configuration, and redeploy the prior artifact. There are no storage-auth
-toggle variables or alternate transitional procedures.
+A plain `git revert` of the secure-storage change is not a safe rollback — tested and
+found unsafe: it stops Terraform from managing `allowSharedKeyAccess`, but Azure keeps
+the account's current value (`false`) rather than resetting it, while the reverted
+Function settings restore key-based connection strings. The result is key credentials
+against accounts that still reject Shared Key. The correct rollback re-enables Shared
+Key deliberately, via the same explicit `azapi_update_resource` mechanism used to
+disable it, applied before or together with restoring connection-string settings; only
+then does redeploying the prior artifact work. Application code never needs reverting —
+the storage client seams are dual-mode. See
+[../../iac/README.md](../../iac/README.md#staging-storage-cutover-and-rollback) for the
+full procedure.
 
 ## Schema layer
 
