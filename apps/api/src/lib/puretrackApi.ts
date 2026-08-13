@@ -6,9 +6,11 @@ import { getTelemetryClient } from "./telemetry.js";
 const BASE_URL = "https://puretrack.io";
 export const PURETRACK_REQUEST_TIMEOUT_MS = 60_000;
 
+// Inbound puretrack.io responses: never `.strict()`. Unknown keys must be stripped, not
+// rejected — a `.strict()` login schema 500'd staging when PureTrack added a `pro` field.
 export const PureTrackLoginResponseSchema = z.object({
   access_token: z.string().min(1),
-}).strict();
+});
 export const PureTrackGroupCleanupTokenSchema = z.looseObject({
   id: z.number().int().positive(),
 });
@@ -16,10 +18,10 @@ export const PureTrackApiGroupSchema = z.object({
   id: z.number().int().positive(),
   name: z.string().min(1),
   slug: z.string().min(1),
-}).strict();
+});
 export const PureTrackListGroupsResponseSchema = z.object({
   data: z.array(PureTrackApiGroupSchema),
-}).strict();
+});
 
 export type PureTrackApiGroup = z.infer<typeof PureTrackApiGroupSchema>;
 export type BeforePureTrackOutbound = () => Promise<void>;
