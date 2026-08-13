@@ -68,10 +68,11 @@ jobs:
             dompurify undici postcss nanoid brace-expansion \
             --package-lock-only --ignore-scripts
 
-          npm install postcss@8.5.23 \
-            --workspace=@bccweb/web --save-exact --package-lock-only --ignore-scripts
-          npm uninstall postcss \
+          npm uninstall vite \
             --workspace=@bccweb/web --package-lock-only --ignore-scripts
+          npm install vite@8.1.2 \
+            --workspace=@bccweb/web --save-dev --save-exact \
+            --package-lock-only --ignore-scripts
 
       - name: Reproduce official graph
         run: npm ci
