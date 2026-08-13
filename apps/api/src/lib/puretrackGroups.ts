@@ -48,7 +48,7 @@ async function writePureTrackGroupBlob(
     roundId,
     createdAt,
     externalId: String(group.id),
-    externalUrl: `${BASE_URL}/group/${group.slug}`,
+    externalUrl: `${BASE_URL}/g/${group.slug}`,
     ...(options.teamId ? { teamId: options.teamId } : {}),
     ...(options.callerUserId ? { createdBy: options.callerUserId } : {}),
   };

@@ -180,7 +180,7 @@ function TeamSection({ team }: { team: BriefTeamEntry }) {
         </div>
         {team.pureTrackGroupSlug && (
           <a
-            href={`https://puretrack.io/group/${team.pureTrackGroupSlug}`}
+            href={`https://puretrack.io/g/${team.pureTrackGroupSlug}`}
             target="_blank"
             rel="noopener noreferrer"
             style={{ fontSize: "0.8rem", color: "#1a4fa0" }}
@@ -322,7 +322,7 @@ function SiteInformationSection({ brief }: { brief: RoundBriefType }) {
           <div>
             <span style={{ fontSize: "0.8rem", color: "#666", fontWeight: 600 }}>PureTrack: </span>
             <a
-              href={`https://puretrack.io/group/${brief.pureTrackGroupSlug}`}
+              href={`https://puretrack.io/g/${brief.pureTrackGroupSlug}`}
               target="_blank"
               rel="noopener noreferrer"
               style={{ color: "#1a4fa0" }}

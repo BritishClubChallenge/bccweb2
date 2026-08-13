@@ -25,6 +25,22 @@ const PROSE_FIELDS = [
 ] as const satisfies readonly (keyof RoundBrief)[];
 
 describe("brief PDF safety fields", () => {
+  it("uses canonical PureTrack links for the round and teams", () => {
+    const html = renderBriefPdfHtml(brief({
+      pureTrackGroupName: "Round group",
+      pureTrackGroupSlug: "round-group",
+      teams: [{
+        teamName: "Alpha",
+        clubName: "Club",
+        pureTrackGroupSlug: "team-group",
+        pilots: [],
+      }],
+    }));
+
+    expect(html).toContain('href="https://puretrack.io/g/round-group"');
+    expect(html).toContain('href="https://puretrack.io/g/team-group"');
+  });
+
   it("includes safety labels", () => {
     const html = renderBriefPdfHtml(brief({
       NOTAMs: "Glider competition nearby",

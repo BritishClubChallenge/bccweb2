@@ -389,7 +389,7 @@ export default function RoundDetail() {
                 <span style={{ color: "#d32f2f" }}>Creation failed</span>
               ) : round.pureTrackGroupSlug ? (
                 <a
-                  href={`https://puretrack.io/group/${round.pureTrackGroupSlug}`}
+                  href={`https://puretrack.io/g/${round.pureTrackGroupSlug}`}
                   target="_blank"
                   rel="noreferrer"
                   style={{ color: "#0066cc" }}

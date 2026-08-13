@@ -204,7 +204,7 @@ describe("RoundDetail — PureTrack rendering", () => {
 
     await screen.findByRole("heading", { name: "Milk Hill" });
     const link = screen.getByRole("link", { name: "Group 1" });
-    expect(link).toHaveAttribute("href", "https://puretrack.io/group/group-1");
+    expect(link).toHaveAttribute("href", "https://puretrack.io/g/group-1");
   });
 
   it("renders 'No groups (none created)' when ready but no group exists", async () => {
@@ -350,7 +350,7 @@ describe("RoundDetail — PureTrack rendering and polling", () => {
     unmount();
     renderPage();
     const link = await screen.findByRole("link", { name: "Round 1 puretrack" });
-    expect(link).toHaveAttribute("href", "https://puretrack.io/group/round-1-puretrack");
+    expect(link).toHaveAttribute("href", "https://puretrack.io/g/round-1-puretrack");
   });
 
   it("polls silently while PureTrack is pending/processing", async () => {

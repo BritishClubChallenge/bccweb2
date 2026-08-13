@@ -160,7 +160,7 @@ export default function AdminPureTrackGroups() {
                   <td style={{ padding: "0.35rem 0.25rem" }}>{g.slug}</td>
                   <td style={{ padding: "0.35rem 0.25rem" }}>
                     <a
-                      href={`https://puretrack.io/group/${g.slug}`}
+                      href={`https://puretrack.io/g/${g.slug}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       style={{ color: "#0066cc", textDecoration: "none" }}
