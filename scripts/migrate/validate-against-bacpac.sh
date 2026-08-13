@@ -20,6 +20,15 @@
 # With none set, the existing local Azurite connection-string default is used.
 # Use --print-config to validate the selected downstream configuration without
 # contacting SQL or Azure; only non-secret target summaries are printed.
+#
+# SECURITY: this script always restores BACPAC_TARGET_CONN via sqlpackage,
+# which is invoked with the SQL target connection string as a command-line
+# argument. Any password it contains is briefly visible in the process table
+# (`ps`, /proc/<pid>/cmdline) to other local users on this machine, for the
+# duration of the import. This is a documented sqlpackage limitation, not a bug
+# in this script (see the comment above the sqlpackage call for detail). On a
+# shared or multi-user host, prefer a BACPAC_TARGET_CONN using
+# Authentication=Active Directory Managed Identity, which carries no password.
 
 set -euo pipefail
 
@@ -247,6 +256,16 @@ printf 'Private container: %s\n' "$PRIVATE_CONTAINER"
 printf 'State dir: %s/.migration-state\n\n' "$TMP_DIR"
 
 printf 'Step 1/6: restoring BACPAC to throwaway DB with sqlpackage...\n'
+# KNOWN, DOCUMENTED EXPOSURE: sqlpackage accepts its target only as a
+# command-line parameter, so BACPAC_TARGET_CONN (including any password it
+# carries) is visible in the process table (`ps`, /proc/<pid>/cmdline) to any
+# local user for the duration of this import. /Profile: is not supported for
+# /Action:Import, and sqlpackage has no env-var or stdin alternative for
+# TargetConnectionString. The only way to avoid a secret here entirely is an
+# Entra managed-identity connection string
+# (Authentication=Active Directory Managed Identity), which carries no
+# password. See scripts/migrate/__tests__/connection-disclosure.test.mjs for
+# the storage-only argv assertion and this documented exception.
 sqlpackage /Action:Import /SourceFile:"$BACPAC_PATH_ABS" /TargetConnectionString:"$BACPAC_TARGET_CONN"
 
 printf 'Step 2/6: creating fresh throwaway blob containers...\n'
