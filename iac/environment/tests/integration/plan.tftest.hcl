@@ -24,6 +24,7 @@ provider "azapi" {}
 variables {
   stamp_name = "inttest"
   location   = "uksouth"
+  app_url    = "https://integration-test.example.invalid"
 
   stamp_rg_name = "rg-bccweb-integration-test"
 
@@ -61,6 +62,9 @@ override_data {
     outputs = {
       app_insights_ids = {
         inttest = "/subscriptions/ba36d2f0-1de7-4f76-a094-d14fecc61d70/resourceGroups/bccweb-prod-9364/providers/Microsoft.Insights/components/aibccwebprod9364"
+      }
+      env_umi_principal_ids = {
+        inttest = "00000000-0000-0000-0000-000000000006"
       }
       acs_id             = "/subscriptions/ba36d2f0-1de7-4f76-a094-d14fecc61d70/resourceGroups/rg-bccweb-shared/providers/Microsoft.Communication/communicationServices/acs-bccweb-shared"
       acs_sender_address = "no-reply@integration-test.example.invalid"

@@ -25,10 +25,8 @@ tfstate_resource_group_name  = "rg-bccweb-tfstate" # REQUIRED: bootstrap state R
 tfstate_storage_account_name = "stbccweb13afe"     # REQUIRED: canonical bootstrap state account
 stamp_rg_name                = "stamp-staging"
 
-# Initial provisioning only: no origins means Blob Storage emits no CORS rule.
-# After the shared SWA exists, replace this with its HTTPS default origin,
-# commit staging.tfvars, and re-apply the environment before browser SPA use.
-allowed_origins = []
+app_url         = "https://nice-desert-0f55cb503-staging.westeurope.7.azurestaticapps.net"
+allowed_origins = ["https://nice-desert-0f55cb503-staging.westeurope.7.azurestaticapps.net"]
 
 ops_email = "<REQUIRED: operator must replace before apply>" # REQUIRED
 

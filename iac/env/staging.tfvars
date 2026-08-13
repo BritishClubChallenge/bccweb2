@@ -9,6 +9,7 @@ tfstate_storage_account_name = "stbccweb13afe"
 stamp_rg_name                = "stamp-staging"
 
 # The SPA reads public indexes directly from the data account.
+app_url         = "https://nice-desert-0f55cb503-staging.westeurope.7.azurestaticapps.net"
 allowed_origins = ["https://nice-desert-0f55cb503-staging.westeurope.7.azurestaticapps.net"]
 tags            = {}
 

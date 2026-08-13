@@ -107,6 +107,7 @@ variables {
   stamp_name                    = "unit"
   stamp_rg_name                 = "rg-bccweb-unit"
   location                      = "uksouth"
+  app_url                       = "https://unit.example.test"
   allowed_origins               = ["https://unit.example.test"]
   storage_sku                   = "Standard_LRS"
   ops_email                     = "ops@example.test"
@@ -204,6 +205,414 @@ run "function_app_settings_use_kv_references" {
     )
     error_message = "Function settings must use only exact managed-identity storage settings, retain both container names, and contain no literal connection string or key value."
   }
+
+  assert {
+    condition = (
+      length([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting if setting.name == "APP_URL"]) == 1 &&
+      one([for setting in azapi_resource.function_app.body.properties.siteConfig.appSettings : setting.value if setting.name == "APP_URL"]) == var.app_url
+    )
+    error_message = "The Function App must have exactly one APP_URL app setting equal to app_url."
+  }
+}
+
+run "app_url_accepts_azure_swa_hostname" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://nice-desert-0f55cb503-staging.westeurope.7.azurestaticapps.net"
+  }
+
+  assert {
+    condition     = var.app_url == lower(trimspace(var.app_url)) && length(var.app_url) <= 261 && can(regex("^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.app_url))
+    error_message = "app_url must be a canonical lowercase HTTPS origin with a DNS hostname."
+  }
+}
+
+run "app_url_accepts_custom_hostname" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://www.advance-bcc.uk"
+  }
+}
+
+run "app_url_rejects_empty_string" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = ""
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_bare_origin_without_dot" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://localhost"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_credentials" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://user:pass@example.test"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_dotless_host" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://intranet"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_host_underscore" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://bad_host.example.test"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_empty_dns_label" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://bad..example.test"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_leading_label_hyphen" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://-bad.example.test"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_trailing_label_hyphen" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://bad-.example.test"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_ipv4_literal" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://192.0.2.1"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_http" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "http://www.advance-bcc.uk"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_uppercase" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://WWW.advance-bcc.uk"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_explicit_port" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://www.advance-bcc.uk:443"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_trailing_slash" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://www.advance-bcc.uk/"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_path" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://www.advance-bcc.uk/auth"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_query_string" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://www.advance-bcc.uk?mode=test"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_fragment" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://www.advance-bcc.uk#auth"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_embedded_whitespace" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://www.advance bcc.uk"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_64_character_dns_label" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.test"
+  }
+
+  expect_failures = [var.app_url]
+}
+
+run "app_url_rejects_total_length_over_261" {
+  command = plan
+
+  providers = {
+    azapi  = azapi.mock
+    random = random.mock
+  }
+
+  module {
+    source = "./tests/unit/stamp-fixture"
+  }
+
+  variables {
+    app_url = "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+
+  expect_failures = [var.app_url]
 }
 
 run "function_app_uses_flex_consumption" {

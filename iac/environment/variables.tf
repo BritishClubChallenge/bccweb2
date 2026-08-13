@@ -64,6 +64,17 @@ variable "location" {
   default     = "swedencentral"
 }
 
+variable "app_url" {
+  description = "Canonical public HTTPS origin used in application-generated links."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = var.app_url == lower(trimspace(var.app_url)) && length(var.app_url) <= 261 && can(regex("^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.app_url))
+    error_message = "app_url must be a canonical lowercase HTTPS origin with a DNS hostname."
+  }
+}
+
 variable "allowed_origins" {
   description = "Allowed CORS origins for the storage blob service."
   type        = list(string)
