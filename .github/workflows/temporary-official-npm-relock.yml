@@ -40,7 +40,8 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "$EXPECTED_REPOSITORY"
           test "$GITHUB_HEAD_REF" = "$EXPECTED_HEAD_REF"
-          test "$(npm config get registry)" = "https://registry.npmjs.org/"
+          registry="$(npm config get registry)"
+          test "${registry%/}" = "https://registry.npmjs.org"
           printf 'repository=%s\npr=%s\nhead_sha=%s\nmerge_sha=%s\nworkflow=%s\n' \
             "$GITHUB_REPOSITORY" \
             "${{ github.event.pull_request.number }}" \
