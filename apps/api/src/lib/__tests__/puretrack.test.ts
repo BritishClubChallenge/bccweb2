@@ -398,6 +398,10 @@ describe("createPureTrackGroups guarded orchestration", () => {
     })).toBe(true);
     expect(beforeOutbound).toHaveBeenCalledTimes(4);
     expect(writePrivateBlobSpy).toHaveBeenCalledTimes(2);
+    expect(writePrivateBlobSpy.mock.calls.map(([, record]) => record)).toEqual([
+      expect.objectContaining({ externalUrl: "https://puretrack.io/g/round" }),
+      expect.objectContaining({ externalUrl: "https://puretrack.io/g/team" }),
+    ]);
   });
 
   it("carries the round id when its record write and immediate delete both fail", async () => {
