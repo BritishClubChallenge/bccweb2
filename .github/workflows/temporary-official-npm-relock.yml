@@ -81,9 +81,15 @@ jobs:
           set -euo pipefail
           npm view nanoid@3.3.18 dist.tarball dist.integrity version --json \
             > "$RUNNER_TEMP/nanoid-dist.json"
+          set +e
           npm audit --omit=dev --audit-level=high --json \
             > "$RUNNER_TEMP/production-audit.json"
+          production_audit_exit="$?"
           npm audit --json > "$RUNNER_TEMP/full-audit.json"
+          full_audit_exit="$?"
+          set -e
+          printf 'production_audit_exit=%s\nfull_audit_exit=%s\n' \
+            "$production_audit_exit" "$full_audit_exit"
           npm ls \
             @opentelemetry/propagator-jaeger \
             protobufjs dompurify undici postcss nanoid brace-expansion \
