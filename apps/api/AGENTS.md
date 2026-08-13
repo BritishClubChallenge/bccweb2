@@ -57,9 +57,12 @@ access; it is not the staging GitHub OIDC operator UMI used by workflows/scripts
 `storageClients.ts` owns this mode selection and fails on incomplete identity settings.
 Other settings are
 `BLOB_CONTAINER_NAME` (`data`), `BLOB_PRIVATE_CONTAINER_NAME` (`data-private`),
-`JWT_SECRET`, `ACS_CONNECTION_STRING`, `ACS_SENDER_ADDRESS`,
+`JWT_SECRET`, `APP_URL` (the deployed public SPA origin used for verification/reset email
+links), `ACS_CONNECTION_STRING`, `ACS_SENDER_ADDRESS`,
 `PURETRACK_*`, `FAI_VALI_ENABLED`, `FAI_VALI_BASE_URL`, `FAI_VALI_TIMEOUT_MS`.
-Copy the example → `local.settings.json`; local Azurite remains connection-string based.
+Terraform sets deployed `APP_URL` from the required `app_url` input. Copy the example →
+`local.settings.json`; local Azurite remains connection-string based and need not set
+`APP_URL` because auth links fall back to `http://localhost:5173`.
 
 ## Testing — gotchas
 

@@ -15,7 +15,7 @@ set -euo pipefail
 #      email.matt-ffffff.com (resource group rg-dns), not at the registrar.
 #
 # Usage:
-#   PROD_HOST=bcc.flyparagliding.org.uk \
+#   PROD_HOST=www.advance-bcc.uk \
 #   SWA_HOST=nice-stone-0a1b2c3d4.azurestaticapps.net \
 #   API_HOST=func-bccweb-prod.azurewebsites.net \
 #   ACS_EMAIL_DOMAIN=email.matt-ffffff.com \

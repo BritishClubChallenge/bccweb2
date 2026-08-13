@@ -25,8 +25,11 @@ tfstate_resource_group_name  = "rg-bccweb-tfstate" # REQUIRED: bootstrap state R
 tfstate_storage_account_name = "stbccweb13afe"     # REQUIRED: canonical bootstrap state account
 stamp_rg_name                = "stamp-prod"
 
-# CORS: replace with the real production hostname before apply.
-allowed_origins = ["https://<your-prod-hostname>"]
+# Required public origin for auth verification/reset email links; deployed as APP_URL.
+# Production is undeployed: DNS resolution, SWA hostname binding, and the existing
+# prod GitHub environment variable WEB_HOST=www.advance-bcc.uk are apply/deploy prerequisites.
+app_url         = "https://www.advance-bcc.uk"
+allowed_origins = ["https://www.advance-bcc.uk"]
 
 ops_email = "<REQUIRED: operator must replace before apply>" # REQUIRED
 

@@ -2,6 +2,8 @@
 
 This document is the official execution plan for transitioning the BCC competition management from the legacy .NET application to the bccweb2 platform.
 
+Production is currently **undeployed**. Before any production Terraform apply or application deploy, `www.advance-bcc.uk` must resolve to the shared SWA and be bound there as a custom hostname, and the existing prod GitHub environment variable must be confirmed as `WEB_HOST=www.advance-bcc.uk`. The committed production `app_url = "https://www.advance-bcc.uk"` is the public base for auth verification/reset email links; do not treat it as reachable until those prerequisites pass.
+
 ## Pre-flight Checklist
 
 The pre-flight phase ensures the destination environment is hardened, secrets are seeded, and legal requirements are met before any data migration starts. Every item in this checklist must be verified by the operator before proceeding to the dry-run.
@@ -169,7 +171,7 @@ The new site is mobile-optimised and includes improved round registration and sa
 **Note**: there is no built-in maintenance-mode page or reference image in this repo yet — the SPA has no maintenance component and `apps/web/public` has no `assets/` directory. Publish this text via whatever hosting-level mechanism is available at cutover time (e.g. a temporary static page swapped in ahead of the SWA deploy, or a banner at the registrar/CDN layer) until a maintenance-mode feature ships.
 
 ### Post-cutover All-Clear Message
-"The migration to bccweb2 is complete. All systems are green. Pilots can now sign in at bcc.flyparagliding.org.uk to update their profiles and register for upcoming rounds."
+"The migration to bccweb2 is complete. All systems are green. Pilots can now sign in at www.advance-bcc.uk to update their profiles and register for upcoming rounds."
 
 ## Rollback plan
 
@@ -179,9 +181,9 @@ The rollback plan provides a guaranteed path back to the legacy system if the bc
 Immediately point the primary CNAME back to the legacy host:
 ```bash
 # Verify current state
-dig bcc.flyparagliding.org.uk CNAME
+dig www.advance-bcc.uk CNAME
 
-# At registrar: Change bcc.flyparagliding.org.uk from <SWA_HOST> to <LEGACY_HOST>
+# At registrar: Change www.advance-bcc.uk from <SWA_HOST> to <LEGACY_HOST>
 # (e.g. bcc-legacy.flyparagliding.org.uk)
 ```
 

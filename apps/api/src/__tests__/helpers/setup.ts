@@ -120,8 +120,8 @@ vi.mock("../../lib/email.js", () => ({
   briefPlainText: vi.fn((siteName: string, dateDisplay: string) => `${siteName} ${dateDisplay}`),
   verificationEmailHtml: vi.fn((url: string) => `<p>verify ${url}</p>`),
   verificationEmailText: vi.fn((url: string) => `verify ${url}`),
-  passwordResetEmailHtml: vi.fn().mockReturnValue("<p>reset</p>"),
-  passwordResetEmailText: vi.fn().mockReturnValue("reset"),
+  passwordResetEmailHtml: vi.fn((url: string) => `<p>reset ${url}</p>`),
+  passwordResetEmailText: vi.fn((url: string) => `reset ${url}`),
 }));
 
 // ─── Email mock helpers ───────────────────────────────────────────────────────

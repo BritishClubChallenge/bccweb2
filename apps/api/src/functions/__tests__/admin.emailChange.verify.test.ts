@@ -13,7 +13,7 @@
  * (deleted token / version mismatch) — a permanent lockout.
  */
 
-import { describe, expect, test, beforeEach } from "vitest";
+import { afterEach, describe, expect, test, beforeEach } from "vitest";
 import { getRegisteredHandler, getSentEmails, clearSentEmails } from "../../__tests__/helpers/setup.js";
 import { makeAuthRequest, makeRequest } from "../../__tests__/helpers/api.js";
 import { bootstrapAdmin, makeUser, readPrivateJson } from "../../__tests__/helpers/seed.js";
@@ -33,6 +33,19 @@ const ctx = {
   invocationId: "test-invocation",
 } as never;
 
+const PUBLIC_ORIGIN = "https://public.example.test";
+const FUNCTION_HOST = "func.example.test";
+const originalAppUrl = process.env["APP_URL"];
+const originalWebsiteHostname = process.env["WEBSITE_HOSTNAME"];
+
+function restoreEnv(name: "APP_URL" | "WEBSITE_HOSTNAME", value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}
+
 async function invoke(
   name: string,
   req: ReturnType<typeof makeAuthRequest>,
@@ -43,7 +56,16 @@ async function invoke(
 }
 
 describe("PUT /api/manage/users/{userId}/email — issue #122 re-verification link (T6)", () => {
-  beforeEach(() => clearSentEmails());
+  beforeEach(() => {
+    process.env["APP_URL"] = PUBLIC_ORIGIN;
+    process.env["WEBSITE_HOSTNAME"] = FUNCTION_HOST;
+    clearSentEmails();
+  });
+
+  afterEach(() => {
+    restoreEnv("APP_URL", originalAppUrl);
+    restoreEnv("WEBSITE_HOSTNAME", originalWebsiteHostname);
+  });
 
   test("A: a verification link is emailed to the NEW address", async () => {
     const { user: admin } = await bootstrapAdmin();
@@ -64,6 +86,11 @@ describe("PUT /api/manage/users/{userId}/email — issue #122 re-verification li
     expect(lastEmail).toBeDefined();
     expect(lastEmail!.to).toContain(newEmail);
     expect(lastEmail!.subject).toMatch(/verify/i);
+    const expectedPrefix = `${PUBLIC_ORIGIN}/verify-email?token=`;
+    expect(lastEmail!.html).toContain(expectedPrefix);
+    expect(lastEmail!.text).toContain(expectedPrefix);
+    expect(lastEmail!.html).not.toContain(FUNCTION_HOST);
+    expect(lastEmail!.text).not.toContain(FUNCTION_HOST);
   });
 
   test("B: the emitted token verifies (locks the GC-then-create ordering)", async () => {

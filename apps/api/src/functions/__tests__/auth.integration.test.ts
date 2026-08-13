@@ -118,6 +118,29 @@ async function seedVerifyToken(
 }
 
 const PASSWORD = "TestPass123!";
+const PUBLIC_ORIGIN = "https://public.example.test";
+const FUNCTION_HOST = "func.example.test";
+const originalAppUrl = process.env["APP_URL"];
+const originalWebsiteHostname = process.env["WEBSITE_HOSTNAME"];
+
+function expectPublicAuthLink(
+  email: { html?: string; text?: string },
+  path: "/verify-email?token=" | "/reset-password?token=",
+): void {
+  const expectedPrefix = `${PUBLIC_ORIGIN}${path}`;
+  expect(email.html).toContain(expectedPrefix);
+  expect(email.text).toContain(expectedPrefix);
+  expect(email.html).not.toContain(FUNCTION_HOST);
+  expect(email.text).not.toContain(FUNCTION_HOST);
+}
+
+function restoreEnv(name: "APP_URL" | "WEBSITE_HOSTNAME", value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}
 
 let ipCounter = 0;
 function uniqueIp(): string {
@@ -129,12 +152,16 @@ function uniqueIp(): string {
 
 describe("auth flow integration", () => {
   beforeEach(() => {
+    process.env["APP_URL"] = PUBLIC_ORIGIN;
+    process.env["WEBSITE_HOSTNAME"] = FUNCTION_HOST;
     resetAllBuckets();
     clearSentEmails();
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    restoreEnv("APP_URL", originalAppUrl);
+    restoreEnv("WEBSITE_HOSTNAME", originalWebsiteHostname);
   });
 
   test("(1) register new email + acceptTsCs=true -> 202; one email; T&C persisted", async () => {
@@ -222,6 +249,35 @@ describe("auth flow integration", () => {
     );
     expect(newState).toBeTruthy();
     expect(newState!.token).not.toBe(staleToken);
+    expectPublicAuthLink(emails[0], "/verify-email?token=");
+    expect(emails[0].html).toContain(newState!.token);
+    expect(emails[0].text).toContain(newState!.token);
+  });
+
+  test("resend-verification uses the public origin and remains silent for an unknown address", async () => {
+    const { user } = await makeUser({ emailVerified: false });
+
+    const exists = await invoke("authResendVerification", {
+      method: "POST",
+      headers: { "x-forwarded-for": uniqueIp() },
+      body: { email: user.email },
+    });
+
+    expect(exists.status).toBe(200);
+    const emails = getSentEmails();
+    expect(emails).toHaveLength(1);
+    expectPublicAuthLink(emails[0], "/verify-email?token=");
+
+    clearSentEmails();
+    const missing = await invoke("authResendVerification", {
+      method: "POST",
+      headers: { "x-forwarded-for": uniqueIp() },
+      body: { email: `nobody-resend-${randomUUID()}@example.com` },
+    });
+
+    expect(missing.status).toBe(200);
+    expect(missing.jsonBody).toEqual(exists.jsonBody);
+    expect(getSentEmails()).toHaveLength(0);
   });
 
   test("(5) verify(token) succeeds; verifying again -> 400 INVALID_TOKEN", async () => {
@@ -464,7 +520,9 @@ describe("auth flow integration", () => {
       body: { email: user.email },
     });
     expect(exists.status).toBe(200);
-    expect(getSentEmails()).toHaveLength(1);
+    const emails = getSentEmails();
+    expect(emails).toHaveLength(1);
+    expectPublicAuthLink(emails[0], "/reset-password?token=");
 
     clearSentEmails();
     const missing = await invoke("authForgotPassword", {

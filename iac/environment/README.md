@@ -29,7 +29,8 @@ always use `../env/<env>.backend.hcl`.
 ## tfvars
 
 `../env/<env>.tfvars` is the committed, tracked, non-secret base — stamp
-name, location, CORS origins, secret-version bumps, and the deterministic
+name, location, required public auth-email origin (`app_url`), CORS origins,
+secret-version bumps, and the deterministic
 topology (`stamp_rg_name`, `tfstate_resource_group_name`,
 `tfstate_storage_account_name`), all committed because they're knowable once
 `terraform_umis`/`github_environments` are fixed in `iac/bootstrap`. Only
@@ -53,6 +54,7 @@ state, or local tfvars/GitHub Secrets as shown:
 | Variable | Source | Notes |
 |---|---|---|
 | `stamp_name` | Committed base tfvars (`iac/env/<env>.tfvars`) | Environment name used as the resource-name suffix; authored, not CI-generated. |
+| `app_url` | Committed base tfvars (`iac/env/<env>.tfvars`) | Required canonical lowercase HTTPS public origin; Terraform publishes it as Function `APP_URL` for verification/reset email links. Staging uses `https://nice-desert-0f55cb503-staging.westeurope.7.azurestaticapps.net`; undeployed production is configured for `https://www.advance-bcc.uk`. |
 | `stamp_rg_name` | Committed base tfvars (`iac/env/<env>.tfvars`) | Deterministic once `terraform_umis`/`github_environments` are fixed in bootstrap; not a GitHub variable. |
 | `tfstate_resource_group_name` | Committed base tfvars (`iac/env/<env>.tfvars`) | Resource group containing the canonical state account; deterministic, not a GitHub variable. |
 | `tfstate_storage_account_name` | Committed base tfvars (`iac/env/<env>.tfvars`) | Canonical state account containing `tfstate-shared/shared.tfstate`; deterministic, not a GitHub variable. |
@@ -91,9 +93,18 @@ needs a separate approved grant. Local/dev/Azurite continues to use
 `AzureWebJobsStorage` and `BLOB_CONNECTION_STRING`.
 
 Production is undeployed; when applied it will receive this same secure-by-default model.
+Before the first production apply/deploy, `www.advance-bcc.uk` must resolve to the shared
+SWA and be bound there as a custom hostname, and the existing prod GitHub environment
+variable must be `WEB_HOST=www.advance-bcc.uk`. The required production
+`app_url = "https://www.advance-bcc.uk"` is then reachable by auth-email recipients and
+the deploy workflow's production-host smoke test.
 Staging cutover is a single `terraform apply` through the manual `terraform.yml` workflow
 or a local apply, followed by a redeploy. A brief staging interruption during cutover is
 acceptable.
+
+Terraform deliberately requires `app_url` to be a canonical HTTPS origin for deployed
+Azure environments. Local development need not set `APP_URL`: `getAppUrl()` falls back
+through `WEBSITE_HOSTNAME` and ultimately to `http://localhost:5173`.
 
 A plain `git revert` of the secure-storage change is **not** a safe rollback: it stops
 Terraform from managing `allowSharedKeyAccess`, but Azure does not reset that property to

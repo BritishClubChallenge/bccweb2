@@ -3,7 +3,7 @@
 This runbook covers two intertwined DNS changes that ship together at production cutover:
 
 1. **ACS email domain verification and activation** — publish SPF, DKIM, DKIM2 and DMARC records in the delegated Azure DNS child zone `email.matt-ffffff.com` (resource group `rg-dns`), wait for Azure verification, then enable the committed domain-link toggle so outbound mail is deliverable.
-2. **Production CNAME flip** — point the public hostname (e.g. `bcc.flyparagliding.org.uk`) at the Azure Static Web App default hostname.
+2. **Production CNAME flip** — point the public hostname (`www.advance-bcc.uk`) at the Azure Static Web App default hostname.
 
 > **ACS email domain is on delegated Azure DNS, not the registrar.** GoDaddy
 > (the domain's registrar) only holds NS delegation records for
@@ -25,6 +25,13 @@ The two changes are independent in DNS but conventionally done in the same opera
 > before applying and confirm the planned record name and CNAME target.
 
 ## Pre-flight
+
+Production is currently **undeployed**. Before any production Terraform apply or
+application deploy, `www.advance-bcc.uk` must resolve to the shared SWA, the hostname
+must be bound on that SWA so its certificate is ready, and the existing prod GitHub
+environment variable must be confirmed as `WEB_HOST=www.advance-bcc.uk`. The committed
+`app_url = "https://www.advance-bcc.uk"` is the auth verification/reset email base and
+must not be treated as reachable until these prerequisites pass.
 
 1. The prod custom domain and its CNAME now live in the **shared root** (`iac/shared`).
    There is exactly one Static Web App (`swa-bccweb-shared`) shared across the whole
@@ -354,7 +361,7 @@ Run the automated smoke script:
 ```bash
 SWA_HOST="$(terraform -chdir=iac/shared output -raw swa_default_hostname)"
 
-PROD_HOST=bcc.flyparagliding.org.uk \
+PROD_HOST=www.advance-bcc.uk \
 SWA_HOST="$SWA_HOST" \
 API_HOST=func-bccweb-prod.azurewebsites.net \
 ACS_EMAIL_DOMAIN=email.matt-ffffff.com \
