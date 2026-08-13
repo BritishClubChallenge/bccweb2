@@ -350,7 +350,7 @@ Account A.
 
 `WEB_HOST` is **prod-only** and required only when a custom
 `production_hostname` is configured for prod (see phase 5 above). Its value
-is that production hostname, e.g. `bcc.flyparagliding.org.uk`. Setting it
+is that production hostname: `www.advance-bcc.uk`. Setting it
 enables `deploy-app.yml`'s production-domain smoke gate, which checks the
 health, seasons, and HTML responses on the real custom domain after a prod
 deploy. If `WEB_HOST` is left unset, that smoke step is skipped by design —
@@ -472,29 +472,39 @@ The first staging environment apply may leave `allowed_origins = []` in
 `iac/env/staging.tfvars`. That bootstraps the stamp with **no Blob Storage CORS
 rules** and is not browser-operational: the SPA cannot read Account B directly
 from a different origin. After the shared apply above, obtain the Azure-assigned
-hostname for the one shared SWA:
+hostname for its named staging environment:
 
 ```sh
-STAGING_SPA_HOSTNAME=$(terraform -chdir=iac/shared output -raw swa_default_hostname)
+STAGING_SPA_HOSTNAME=$(az staticwebapp environment show --name swa-bccweb-shared --resource-group <shared-rg> --environment-name staging --query hostname -o tsv)
 ```
 
 That single Standard SWA serves the stable environment deployments and PR
 preview environments; deploy automation links each environment's Function App
 backend to it rather than provisioning an SWA per stamp. Set staging's committed
-origin to `allowed_origins = ["https://${STAGING_SPA_HOSTNAME}"]`, commit
+origin in both `app_url = "https://${STAGING_SPA_HOSTNAME}"` and
+`allowed_origins = ["https://${STAGING_SPA_HOSTNAME}"]`, commit
 `iac/env/staging.tfvars`, and re-apply `iac/environment` for staging before any
-browser use. Do not add a wildcard or treat the initial empty-origin apply as a
-usable staging deployment.
+browser use. `app_url` becomes the Function App's public base for auth
+verification/reset email links. Do not add a wildcard or treat the initial
+empty-origin apply as a usable staging deployment.
 
 ```sh
 terraform -chdir=iac/environment init -backend-config=../env/staging.backend.hcl
 terraform -chdir=iac/environment apply -var-file=../env/staging.tfvars -var-file=../env/staging.local.tfvars -var 'terraform_principal_type=User'
+```
 
+Production is currently **undeployed**. Before running its first apply or deploy,
+`www.advance-bcc.uk` must resolve to the shared SWA and be bound there as a custom
+hostname, and the existing prod GitHub environment variable must be confirmed as
+`WEB_HOST=www.advance-bcc.uk`; follow `docs/runbooks/dns-cutover.md`. Only after
+those prerequisites are complete run:
+
+```sh
 terraform -chdir=iac/environment init -reconfigure -backend-config=../env/prod.backend.hcl
 terraform -chdir=iac/environment apply -var-file=../env/prod.tfvars -var-file=../env/prod.local.tfvars -var 'terraform_principal_type=User'
 ```
 
-`prod` here is a **first-time provision** in the refactored topology (per
+That `prod` apply is a **first-time provision** in the refactored topology (per
 phase 5.6's empty-inventory branch) — there is no prod teardown phase in
 this runbook, and there must never be one: prod is the one environment this
 migration creates rather than tears down and recreates.

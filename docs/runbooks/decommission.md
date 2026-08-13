@@ -70,12 +70,12 @@ Follow these steps in sequence on the scheduled decommission day.
 Capture a final Application Insights dashboard screenshot and export the last 7 days of the `exceptions` and `requests` logs to `.omo/evidence/ops/decommission-pre-check-{date}.json`.
 
 ### 2. Redirect Legacy Hostname
-Configure a permanent redirect (301) from `legacy.bcc.org.uk` to the primary bccweb2 hostname (`bcc.flyparagliding.org.uk`). This can be done via the registrar's redirect service or a small static site.
+Configure a permanent redirect (301) from `legacy.bcc.org.uk` to the primary bccweb2 hostname (`www.advance-bcc.uk`). This can be done via the registrar's redirect service or a small static site.
 ```bash
 # Verify redirect
 curl -I https://legacy.bcc.org.uk
 # Expected: HTTP/1.1 301 Moved Permanently
-# Location: https://bcc.flyparagliding.org.uk/
+# Location: https://www.advance-bcc.uk/
 ```
 
 ### 3. Final SQL Export

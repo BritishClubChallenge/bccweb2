@@ -25,6 +25,7 @@ tfstate_resource_group_name  = "rg-bccweb-tfstate" # REQUIRED: bootstrap state R
 tfstate_storage_account_name = "stbccweb13afe"     # REQUIRED: canonical bootstrap state account
 stamp_rg_name                = "stamp-staging"
 
+# Required public origin for auth verification/reset email links; deployed as APP_URL.
 app_url         = "https://nice-desert-0f55cb503-staging.westeurope.7.azurestaticapps.net"
 allowed_origins = ["https://nice-desert-0f55cb503-staging.westeurope.7.azurestaticapps.net"]
 

@@ -124,8 +124,9 @@ Follow these steps to provision the topology from scratch.
 5.  **Prepare the environment root's local overlay**: the canonical backend
     file (`iac/env/<env>.backend.hcl`) is committed and may also be generated
     by bootstrap at that same path. `iac/env/staging.tfvars` is already the
-    committed base — stamp name, location, CORS origins, secret-version
-    bumps, and the deterministic topology (`stamp_rg_name`,
+    committed base — stamp name, location, required public auth-email origin
+    (`app_url`), CORS origins, secret-version bumps, and the deterministic
+    topology (`stamp_rg_name`,
     `tfstate_resource_group_name`, `tfstate_storage_account_name`). Only
     secrets (`ops_email`, `puretrack_*`, plus the optional Slack webhook)
     live in a gitignored local overlay. Copy its template and fill in the
@@ -167,12 +168,31 @@ Follow these steps to provision the topology from scratch.
 
     Staging may be provisioned initially with `allowed_origins = []`; this emits
     no Blob Storage CORS rule and is therefore not ready for browser SPA use.
-    Once the one shared SWA exists, read its Azure-assigned hostname with
-    `terraform -chdir=iac/shared output -raw swa_default_hostname`, commit
+    Once the one shared SWA exists and its named staging environment has been
+    deployed, read that environment's Azure-assigned hostname (not the shared
+    production default hostname) with:
+    ```bash
+    az staticwebapp environment show --name swa-bccweb-shared --resource-group <shared-rg> --environment-name staging --query hostname -o tsv
+    ```
+    Commit `app_url = "https://<that-hostname>"` and
     `allowed_origins = ["https://<that-hostname>"]` to
     `iac/env/staging.tfvars`, and re-apply staging before using the SPA. The
     shared SWA serves stable environment deployments and PR previews while
     deploy automation maps each environment's Function App backend to it.
+
+    `app_url` is required for every Azure environment and Terraform validates it
+    as a canonical lowercase HTTPS origin before setting the Function App's
+    `APP_URL`; auth verification/reset emails use that public origin. This HTTPS
+    deployment contract does not make `APP_URL` mandatory for local development:
+    the runtime helper falls back to `http://localhost:5173` when neither
+    `APP_URL` nor `WEBSITE_HOSTNAME` is set.
+
+    **Production remains undeployed.** Before its first apply/deploy,
+    `www.advance-bcc.uk` must resolve to the shared SWA and be bound there as a
+    custom hostname, and the existing prod GitHub environment variable must be
+    `WEB_HOST=www.advance-bcc.uk`. Only then may the committed
+    `app_url = "https://www.advance-bcc.uk"` be treated as reachable for auth
+    email links and the production-domain smoke gate.
 
     After the shared apply, publish the DNS records printed by
     `terraform -chdir=iac/shared output acs_dns_records_for_operator` into the
@@ -265,7 +285,8 @@ To add a new application environment (e.g., a second `staging`-like env):
       jq -er --arg env "$env" '.[] | select(contains("iac/env/\($env).backend.hcl"))'
     ```
     Also commit both a non-secret `iac/env/<env>.tfvars` base file — including
-    the deterministic topology (`stamp_rg_name`,
+    the required canonical HTTPS auth-email origin (`app_url`), the deterministic
+    topology (`stamp_rg_name`,
     `tfstate_resource_group_name`, `tfstate_storage_account_name`) that
     bootstrap's outputs make knowable up front — and an
     `iac/env/<env>.tfvars.example` full-schema reference, plus a gitignored
@@ -302,7 +323,7 @@ value that's knowable once `terraform_umis`/`github_environments` are fixed
 — `shared_rg_name`, `stamp_rg_name`, `tfstate_resource_group_name`,
 `tfstate_storage_account_name`, plus every authored config value
 (`production_hostname`, `dns_zone_name`, `dns_zone_resource_group_name`,
-`allowed_origins`, `jwt_secret_version`, `acs_secret_version`,
+`app_url`, `allowed_origins`, `jwt_secret_version`, `acs_secret_version`,
 `blob_schema_mode`, `acs_email_domain`, `acs_sender_address`) — lives only in
 the committed base tfvars (`iac/env/<env>.tfvars`). Both local applies and CI
 load that same file with `-var-file`; there is no GitHub-side duplicate to
@@ -325,7 +346,7 @@ duplicates it.
 | `TF_VAR_slack_webhook_url` | Secret | `staging`, `prod` | Operator-set (optional, defaulted) |
 | `AZURE_FUNCTIONAPP_NAME` | Variable | `staging`, `prod` | Operator-set |
 | `VITE_BLOB_BASE_URL` | Variable | `staging`, `prod` | Operator-set |
-| `WEB_HOST` | Variable | `prod` | Operator-set (production web hostname for the deploy-app.yml production-domain smoke; set only when a custom domain is enabled) |
+| `WEB_HOST` | Variable | `prod` | Operator-set (production web hostname for the deploy-app.yml production-domain smoke; the existing value is `www.advance-bcc.uk` and must resolve to and be bound on the shared SWA before the currently undeployed production stamp is applied/deployed) |
 
 Required-value validation is Terraform-native: `iac/shared` and
 `iac/environment` variables carry `validation` blocks (e.g.

@@ -220,8 +220,10 @@ local/dev uses `AzureWebJobsStorage` and `BLOB_CONNECTION_STRING`; Azure identit
 `BLOB_PRIVATE_CONTAINER_NAME` (`data-private`), `JWT_SECRET` (≥32 chars),
 `ACS_CONNECTION_STRING`, `ACS_SENDER_ADDRESS`, `PURETRACK_*`, `FAI_VALI_ENABLED`
 (process-level kill switch for FAI signature validation), `FAI_VALI_BASE_URL`,
-`FAI_VALI_TIMEOUT_MS`. Copy the example →
-`local.settings.json`. Round-brief recipients are no
+`FAI_VALI_TIMEOUT_MS`. Deployed Azure additionally sets `APP_URL` to the public SPA
+origin used for verification/reset email links. Copy the example →
+`local.settings.json`; local development does not need `APP_URL` because the auth helper
+falls back to `http://localhost:5173`. Round-brief recipients are no
 longer an env var — they live in `config.json`'s `roundBriefRecipients` (admin-editable);
 leave it empty to disable brief email.
 
@@ -277,8 +279,15 @@ Functions↔SWA backend link) rather than a Terraform-managed backend resource.
 
 Environment configuration is deterministic, non-secret Terraform topology (`shared_rg_name`,
 `stamp_rg_name`, `tfstate_resource_group_name`, `tfstate_storage_account_name`) committed
-directly in `iac/env/{shared,staging,prod}.tfvars`, plus explicit `TF_VAR_*` GitHub environment
-secret mappings in `terraform-run.yml` for operator secrets (`ops_email`, `puretrack_*`,
+directly in `iac/env/{shared,staging,prod}.tfvars`. Each environment's required `app_url` is
+also committed there and Terraform publishes it to the Function App as `APP_URL`, the public
+origin used for auth verification/reset email links. Staging uses
+`https://nice-desert-0f55cb503-staging.westeurope.7.azurestaticapps.net`; production is
+undeployed and is configured for `https://www.advance-bcc.uk`. Before the first production
+apply/deploy, that hostname must resolve to and be bound on the shared SWA, and the existing
+prod GitHub environment variable must remain `WEB_HOST=www.advance-bcc.uk`. Operator secrets
+use explicit `TF_VAR_*` GitHub environment secret mappings in `terraform-run.yml`
+(`ops_email`, `puretrack_*`,
 `slack_webhook_url`). Shared plans additionally load the committed
 `iac/env/shared.generated.tfvars`; environment plans never load it. There are no GitHub
 Terraform-input variables. Terraform-native `validation` blocks replace the shell required-vars
