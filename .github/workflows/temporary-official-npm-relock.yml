@@ -1,0 +1,216 @@
+# SPDX-FileCopyrightText: 2026 British Club Challenge authors
+# SPDX-License-Identifier: MPL-2.0
+name: Temporary official npm relock
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temporary-official-npm-relock-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  relock:
+    name: Generate official npm lock
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'plan/security-vulnerability-remediation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      NPM_CONFIG_REPLACE_REGISTRY_HOST: npmjs
+      ARTIFACT_NAME: official-npm-relock-${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out PR merge ref
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Node with mise
+        uses: ./.github/actions/setup-node-mise
+
+      - name: Verify run provenance
+        env:
+          EXPECTED_REPOSITORY: matt-FFFFFF/bccweb2
+          EXPECTED_HEAD_REF: plan/security-vulnerability-remediation
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$EXPECTED_REPOSITORY"
+          test "$GITHUB_HEAD_REF" = "$EXPECTED_HEAD_REF"
+          test "$(npm config get registry)" = "https://registry.npmjs.org/"
+          printf 'repository=%s\npr=%s\nhead_sha=%s\nmerge_sha=%s\nworkflow=%s\n' \
+            "$GITHUB_REPOSITORY" \
+            "${{ github.event.pull_request.number }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            "$GITHUB_SHA" \
+            "$GITHUB_WORKFLOW"
+
+      - name: Regenerate patched dependency graph
+        run: |
+          set -euo pipefail
+          npm install applicationinsights@3.16.0 \
+            --workspace=@bccweb/api --save-exact --package-lock-only --ignore-scripts
+          npm install react-router@8.3.0 \
+            --workspace=@bccweb/web --save-exact --package-lock-only --ignore-scripts
+
+          npm install \
+            dompurify@3.4.13 \
+            undici@7.29.0 \
+            postcss@8.5.23 \
+            nanoid@3.3.18 \
+            brace-expansion@5.0.9 \
+            --save-exact --package-lock-only --ignore-scripts
+          npm uninstall \
+            dompurify undici postcss nanoid brace-expansion \
+            --package-lock-only --ignore-scripts
+
+          npm install postcss@8.5.23 \
+            --workspace=@bccweb/web --save-exact --package-lock-only --ignore-scripts
+          npm uninstall postcss \
+            --workspace=@bccweb/web --package-lock-only --ignore-scripts
+
+      - name: Reproduce official graph
+        run: npm ci
+
+      - name: Assert versions, provenance, and advisories
+        run: |
+          set -euo pipefail
+          npm view nanoid@3.3.18 dist.tarball dist.integrity version --json \
+            > "$RUNNER_TEMP/nanoid-dist.json"
+          npm audit --omit=dev --audit-level=high --json \
+            > "$RUNNER_TEMP/production-audit.json"
+          npm audit --json > "$RUNNER_TEMP/full-audit.json"
+          npm ls \
+            @opentelemetry/propagator-jaeger \
+            protobufjs dompurify undici postcss nanoid brace-expansion \
+            applicationinsights react-router --all
+
+          node <<'NODE'
+          const fs = require('node:fs');
+          const semver = require('semver');
+
+          const parse = (path) => JSON.parse(fs.readFileSync(path, 'utf8'));
+          const api = parse('apps/api/package.json');
+          const web = parse('apps/web/package.json');
+          const root = parse('package.json');
+          const lock = parse('package-lock.json');
+          const dist = parse(`${process.env.RUNNER_TEMP}/nanoid-dist.json`);
+          const productionAudit = parse(`${process.env.RUNNER_TEMP}/production-audit.json`);
+          const fullAudit = parse(`${process.env.RUNNER_TEMP}/full-audit.json`);
+          const assert = (condition, message) => {
+            if (!condition) throw new Error(message);
+          };
+          const rows = (name) => {
+            const suffix = `node_modules/${name}`;
+            return Object.entries(lock.packages)
+              .filter(([path]) => path === suffix || path.endsWith(`/${suffix}`))
+              .map(([path, value]) => ({ path, version: value.version }));
+          };
+
+          assert(api.dependencies.applicationinsights === '3.16.0', 'applicationinsights');
+          assert(web.dependencies['react-router'] === '8.3.0', 'react-router');
+          for (const manifest of [root, api, web]) {
+            for (const name of ['dompurify', 'undici', 'postcss', 'nanoid', 'brace-expansion']) {
+              assert(manifest.dependencies?.[name] === undefined, `${name} direct dependency`);
+              assert(manifest.devDependencies?.[name] === undefined, `${name} direct devDependency`);
+            }
+          }
+          assert(lock.lockfileVersion === 3, 'lockfileVersion');
+
+          const minima = new Map([
+            ['@opentelemetry/propagator-jaeger', '2.9.0'],
+            ['protobufjs', '7.6.5'],
+            ['dompurify', '3.4.13'],
+            ['postcss', '8.5.23'],
+            ['nanoid', '3.3.18'],
+            ['brace-expansion', '5.0.9'],
+          ]);
+          for (const [name, minimum] of minima) {
+            const found = rows(name);
+            assert(found.length > 0, `${name} missing`);
+            assert(found.every(({ version }) => semver.gte(version, minimum)), `${name} below ${minimum}`);
+          }
+          const undici7 = rows('undici').filter(({ version }) => semver.major(version) === 7);
+          assert(undici7.length > 0, 'undici 7 missing');
+          assert(undici7.every(({ version }) => semver.gte(version, '7.29.0')), 'undici 7 below 7.29.0');
+
+          const nanoid = lock.packages['node_modules/nanoid'];
+          assert(nanoid.version === '3.3.18', 'nanoid lock version');
+          assert(nanoid.resolved === dist['dist.tarball'], 'nanoid official tarball URL');
+          assert(nanoid.integrity === dist['dist.integrity'], 'nanoid official integrity');
+          assert(nanoid.resolved === 'https://registry.npmjs.org/nanoid/-/nanoid-3.3.18.tgz', 'nanoid registry URL');
+
+          for (const [name, audit] of [['production', productionAudit], ['full', fullAudit]]) {
+            assert(audit.metadata.vulnerabilities.total === 0, `${name} audit total`);
+            assert(Object.keys(audit.vulnerabilities ?? {}).length === 0, `${name} advisories`);
+          }
+          const targetGhsas = [
+            'GHSA-3jxr-9vmj-r5cp', 'GHSA-j3f2-48v5-ccww', 'GHSA-45rx-2jwx-cxfr',
+            'GHSA-c2j3-45gr-mqc4', 'GHSA-r28c-9q8g-f849', 'GHSA-8xcm-r25x-g524',
+            'GHSA-4cwx-7wf7-3272', 'GHSA-v3r7-h72x-cjcm', 'GHSA-jr45-8vmc-qm54',
+            'GHSA-m8rv-5g2x-5cg5', 'GHSA-qwww-vcr4-c8h2', 'GHSA-55q2-fjhq-7xh7',
+            'GHSA-fxqj-rqcc-2cmp', 'GHSA-2v37-7h3g-55p8',
+          ];
+          const auditJson = JSON.stringify(fullAudit);
+          for (const ghsa of targetGhsas) assert(!auditJson.includes(ghsa), `${ghsa} remains`);
+          console.log(`nanoid_tarball=${nanoid.resolved}`);
+          console.log(`nanoid_integrity=${nanoid.integrity}`);
+          console.log('dependency_assertions=PASS');
+          NODE
+
+      - name: Verify installed nanoid matches published npm package
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/npm-pack" "$RUNNER_TEMP/npm-published"
+          npm pack nanoid@3.3.18 --json --pack-destination "$RUNNER_TEMP/npm-pack" \
+            > "$RUNNER_TEMP/nanoid-pack.json"
+          tar -xzf "$RUNNER_TEMP/npm-pack/nanoid-3.3.18.tgz" \
+            -C "$RUNNER_TEMP/npm-published"
+          diff -qr "$RUNNER_TEMP/npm-published/package" node_modules/nanoid
+          published_files="$(find "$RUNNER_TEMP/npm-published/package" -type f | wc -l | tr -d ' ')"
+          installed_files="$(find node_modules/nanoid -type f | wc -l | tr -d ' ')"
+          test "$published_files" = "$installed_files"
+          printf 'published_nanoid_files=%s\ninstalled_nanoid_files=%s\n' \
+            "$published_files" "$installed_files"
+
+      - name: Package checksummed dependency files
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/relock-payload"
+          install -d -m 0700 "$payload/apps/api" "$payload/apps/web"
+          install -m 0600 apps/api/package.json "$payload/apps/api/package.json"
+          install -m 0600 apps/web/package.json "$payload/apps/web/package.json"
+          install -m 0600 package-lock.json "$payload/package-lock.json"
+          (
+            cd "$payload"
+            sha256sum apps/api/package.json apps/web/package.json package-lock.json \
+              > SHA256SUMS
+            tar -czf "$RUNNER_TEMP/official-npm-relock.tar.gz" \
+              SHA256SUMS apps/api/package.json apps/web/package.json package-lock.json
+          )
+          sha256sum "$RUNNER_TEMP/official-npm-relock.tar.gz" \
+            > "$RUNNER_TEMP/official-npm-relock.tar.gz.sha256"
+          tar -tzf "$RUNNER_TEMP/official-npm-relock.tar.gz"
+          cat "$RUNNER_TEMP/official-npm-relock.tar.gz.sha256"
+
+      - name: Upload trusted relock artifact
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: |
+            ${{ runner.temp }}/official-npm-relock.tar.gz
+            ${{ runner.temp }}/official-npm-relock.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 5
+          compression-level: 0
+
+      - name: Emit artifact receipt
+        run: |
+          printf 'artifact_name=%s\nartifact_id=%s\nartifact_digest=%s\n' \
+            "$ARTIFACT_NAME" \
+            '${{ steps.upload.outputs.artifact-id }}' \
+            '${{ steps.upload.outputs.artifact-digest }}'
