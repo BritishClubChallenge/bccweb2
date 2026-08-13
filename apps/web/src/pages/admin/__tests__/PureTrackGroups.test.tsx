@@ -61,8 +61,8 @@ describe("AdminPureTrackGroups", () => {
     expect(screen.getByText("other-group")).toBeVisible();
 
     const links = screen.getAllByRole("link");
-    expect(links[0]).toHaveAttribute("href", "https://puretrack.io/group/test-group");
-    expect(links[1]).toHaveAttribute("href", "https://puretrack.io/group/other-group");
+    expect(links[0]).toHaveAttribute("href", "https://puretrack.io/g/test-group");
+    expect(links[1]).toHaveAttribute("href", "https://puretrack.io/g/other-group");
   });
 
   it("selecting and deleting calls api.post with the ids", async () => {
