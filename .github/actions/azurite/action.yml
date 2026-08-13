@@ -11,7 +11,7 @@ runs:
       run: |
         docker rm -f azurite >/dev/null 2>&1 || true
         docker run -d --name azurite -p 10000:10000 -p 10001:10001 \
-          mcr.microsoft.com/azure-storage/azurite \
+          mcr.microsoft.com/azure-storage/azurite@sha256:d5bb99496dc82ef0e34401ced6726d2f5d8fcbdf48670ba067ee3b394884cc3a \
           azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --skipApiVersionCheck
 
     - name: Wait for Azurite
