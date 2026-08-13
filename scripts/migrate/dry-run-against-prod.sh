@@ -12,6 +12,15 @@
 # STAGING_BLOB_CONN takes precedence when both staging target variables are set.
 # Use --print-config to validate the selected downstream configuration without
 # contacting SQL or Azure; only non-secret target summaries are printed.
+#
+# SECURITY: if a BACPAC restore runs (BACPAC_PATH + BACPAC_TARGET_CONN set),
+# sqlpackage is invoked with the SQL target connection string as a command-line
+# argument. Any password it contains is briefly visible in the process table
+# (`ps`, /proc/<pid>/cmdline) to other local users on this machine, for the
+# duration of the import. This is a documented sqlpackage limitation, not a bug
+# in this script (see the comment above the sqlpackage call for detail). On a
+# shared or multi-user host, prefer a BACPAC_TARGET_CONN using
+# Authentication=Active Directory Managed Identity, which carries no password.
 
 set -euo pipefail
 
@@ -149,6 +158,16 @@ if [[ -n "${BACPAC_PATH:-}" ]]; then
       printf 'Example: sqlpackage /Action:Import /SourceFile:"%s" /TargetConnectionString:"<restored-db-conn>"\n' "$BACPAC_PATH" >&2
       fail "set BACPAC_TARGET_CONN to allow automated BACPAC restore"
     fi
+    # KNOWN, DOCUMENTED EXPOSURE: sqlpackage accepts its target only as a
+    # command-line parameter, so BACPAC_TARGET_CONN (including any password it
+    # carries) is visible in the process table (`ps`, /proc/<pid>/cmdline) to
+    # any local user for the duration of this import. /Profile: is not
+    # supported for /Action:Import, and sqlpackage has no env-var or stdin
+    # alternative for TargetConnectionString. The only way to avoid a secret
+    # here entirely is an Entra managed-identity connection string
+    # (Authentication=Active Directory Managed Identity), which carries no
+    # password. See scripts/migrate/__tests__/connection-disclosure.test.mjs
+    # for the storage-only argv assertion and this documented exception.
     sqlpackage /Action:Import /SourceFile:"$BACPAC_PATH" /TargetConnectionString:"$BACPAC_TARGET_CONN"
     PROD_SQL_CONN="$BACPAC_TARGET_CONN"
     printf 'BACPAC restored; continuing against BACPAC_TARGET_CONN.\n'

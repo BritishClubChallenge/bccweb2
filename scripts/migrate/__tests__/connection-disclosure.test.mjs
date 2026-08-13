@@ -101,4 +101,32 @@ describe("migration wrapper connection summaries", () => {
     assert.doesNotMatch(sources, /--connection-string/);
     assert.doesNotMatch(sources, /process\.argv\[[^\]]+\].*(?:CONN|connection)/i);
   });
+
+  // KNOWN, DOCUMENTED EXCEPTION: sqlpackage has no profile/env/stdin
+  // alternative for /Action:Import, so BACPAC_TARGET_CONN unavoidably passes
+  // through argv and is briefly visible in the process table. This is not a
+  // regression to guard against; it is a documented limitation (see the
+  // comments above both sqlpackage invocations and each script's header).
+  // This test only proves that fact stays true and documented, and that the
+  // exception is scoped to the sqlpackage call and never widens to also cover
+  // storage connection strings.
+  test("the only argv-exposed connection string is the sqlpackage SQL target, and it stays documented", () => {
+    const sources = [DRY_RUN_SCRIPT, BACPAC_SCRIPT].map((path) => ({
+      path,
+      text: readFileSync(path, "utf8"),
+    }));
+
+    for (const { path, text } of sources) {
+      const sqlpackageLines = text
+        .split("\n")
+        .filter((line) => line.trim().startsWith("sqlpackage /Action:Import"));
+      assert.equal(sqlpackageLines.length, 1, `expected exactly one sqlpackage invocation in ${path}`);
+      assert.match(sqlpackageLines[0], /\/TargetConnectionString:"\$BACPAC_TARGET_CONN"/);
+
+      // The invocation must remain preceded by the exposure comment: this is
+      // the only sanctioned argv exposure, and it must stay explained.
+      assert.match(text, /KNOWN, DOCUMENTED EXPOSURE: sqlpackage accepts its target only as a/);
+      assert.match(text, /Authentication=Active Directory Managed Identity/);
+    }
+  });
 });
