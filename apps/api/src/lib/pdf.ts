@@ -188,7 +188,7 @@ const TEMPLATE_SRC = `<!DOCTYPE html>
   {{#if pureTrackGroupName}}
   <div class="info-item">
     <label>PureTrack Group</label>
-    <a href="https://puretrack.io/group/{{pureTrackGroupSlug}}">{{pureTrackGroupName}}</a>
+    <a href="https://puretrack.io/g/{{pureTrackGroupSlug}}">{{pureTrackGroupName}}</a>
   </div>
   {{/if}}
 </div>
@@ -229,7 +229,7 @@ const TEMPLATE_SRC = `<!DOCTYPE html>
       <span class="team-club"> &mdash; {{clubName}}</span>
     </div>
     {{#if pureTrackGroupSlug}}
-    <span class="team-pt">PT: <a href="https://puretrack.io/group/{{pureTrackGroupSlug}}">{{pureTrackGroupSlug}}</a></span>
+    <span class="team-pt">PT: <a href="https://puretrack.io/g/{{pureTrackGroupSlug}}">{{pureTrackGroupSlug}}</a></span>
     {{/if}}
   </div>
   <table>
