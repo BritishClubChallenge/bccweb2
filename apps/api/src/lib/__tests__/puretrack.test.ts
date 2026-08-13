@@ -80,8 +80,8 @@ describe("PureTrack API contracts", () => {
 
   it.each([
     { access_token: "" },
-    { access_token: "token", extra: true },
-  ])("strict-parses the login token before requesting CSRF: %s", async (body) => {
+    {},
+  ])("rejects a login response without a usable access token: %s", async (body) => {
     const { authenticate } = await import("../puretrack.js");
     const beforeOutbound = vi.fn().mockResolvedValue(undefined);
     fetchMock.mockResolvedValueOnce(jsonResponse(body));
@@ -90,6 +90,23 @@ describe("PureTrack API contracts", () => {
 
     expect(beforeOutbound).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("tolerates unexpected keys in the login response (regression: PureTrack added `pro`)", async () => {
+    const { authenticate } = await import("../puretrack.js");
+    const beforeOutbound = vi.fn().mockResolvedValue(undefined);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ access_token: "token", pro: true }))
+      .mockResolvedValueOnce(new Response('<meta name="csrf-token" content="csrf-xyz">', {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }));
+
+    const result = await authenticate(beforeOutbound);
+
+    expect(result).toEqual({ accessToken: "token", csrfToken: "csrf-xyz", cookieHeader: "" });
+    expect(beforeOutbound).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("reuses one authenticated session for list and create calls", async () => {
@@ -139,11 +156,9 @@ describe("PureTrack API contracts", () => {
   });
 
   it.each<readonly [unknown, string]>([
-    [{ data: [{ id: 1, name: "Name", slug: "slug", extra: true }] }, "extra group field"],
     [{ data: [{ id: 1, name: "Name" }] }, "missing group field"],
     [{ data: [{ id: 0, name: "Name", slug: "slug" }] }, "non-positive group id"],
     [{ groups: [] }, "missing data"],
-    [{ data: [], extra: true }, "extra response field"],
   ])("rejects a malformed list response: %s (%s)", async (body) => {
     const { listMyGroups } = await import("../puretrack.js");
     fetchMock.mockResolvedValueOnce(jsonResponse(body));
@@ -151,17 +166,36 @@ describe("PureTrack API contracts", () => {
     await expect(listMyGroups(session, vi.fn().mockResolvedValue(undefined))).rejects.toThrow();
   });
 
-  it.each([
-    { id: 41, name: "Name", slug: "slug", extra: true },
-    { id: 41, name: "Name" },
-  ])("preserves a valid cleanupId when the full create response is malformed: %s", async (body) => {
+  it("tolerates and strips unexpected keys in a list response and its groups", async () => {
+    const { listMyGroups } = await import("../puretrack.js");
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      data: [{ id: 1, name: "Name", slug: "slug", pro: true }],
+      extra: true,
+    }));
+
+    const groups = await listMyGroups(session, vi.fn().mockResolvedValue(undefined));
+
+    expect(groups).toEqual([{ id: 1, name: "Name", slug: "slug" }]);
+  });
+
+  it("preserves a valid cleanupId when the full create response is malformed", async () => {
     const { createGroup, PureTrackCreateResponseError } = await import("../puretrack.js");
-    fetchMock.mockResolvedValueOnce(jsonResponse(body));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 41, name: "Name" }));
 
     const error = await createGroup("Name", vi.fn().mockResolvedValue(undefined), session).catch((cause: unknown) => cause);
 
     expect(error).toBeInstanceOf(PureTrackCreateResponseError);
     expect(error).toMatchObject({ cleanupId: 41 });
+    expect(trackEventSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns a created group with unexpected keys stripped instead of treating it as an orphan", async () => {
+    const { createGroup } = await import("../puretrack.js");
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 41, name: "Name", slug: "slug", pro: true }));
+
+    const created = await createGroup("Name", vi.fn().mockResolvedValue(undefined), session);
+
+    expect(created).toEqual({ id: 41, name: "Name", slug: "slug" });
     expect(trackEventSpy).not.toHaveBeenCalled();
   });
 
