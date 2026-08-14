@@ -48,7 +48,18 @@ One root [`package-lock.json`](package-lock.json) for the whole workspace graph 
 hoists + dedupes so shared tooling resolves to one version and there's a single
 audit/Dependabot surface. **Do not split per-app lockfiles** (breaks `@bccweb/*`
 symlinking, drifts versions). [`.npmrc`](.npmrc): `engine-strict` + `save-exact`
-(no-caret). Updates are security-only via Dependabot (no `dependabot.yml`). Exception:
+(no-caret). Dependency updates run through Dependabot: quarterly version updates
+are configured in [`.github/dependabot.yml`](.github/dependabot.yml), and
+lockfile-only security PRs come from the repo security-update setting (no config
+file needed) and are normally green and mergeable. The root npm entry is
+intentionally ungrouped: Dependabot computes an out-of-sync root
+`package-lock.json` for multi-dependency update PRs in this
+npm-workspaces/single-lockfile layout (`npm ci` fails EUSAGE; see broken PRs
+#151/#157/#199/#202), so individual PRs are the only shape that lands.
+Dependabot PRs that bump exact-pinned direct deps still arrive red for the same
+reason and are treated as notifications: carry the bump manually (exact pin +
+`npm install`), never merge the red PR. The `scripts/migrate` and
+`github-actions` entries remain grouped. Exception:
 `scripts/migrate/` is a standalone package **outside** the `workspaces` globs with its
 own lockfile (pulls `mssql`, kept out of the deployed tree); root `npm ci` skips it,
 `ci.yml` installs it separately for migration unit tests. See
