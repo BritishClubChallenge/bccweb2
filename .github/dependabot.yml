@@ -7,18 +7,19 @@
 #
 # Cadence: quarterly — Dependabot runs on the 1st of Jan / Apr / Jul / Oct.
 # Major versions are intentionally INCLUDED (no semver-major ignore rule).
-# Updates are grouped so each quarter lands a few consolidated PRs, not dozens.
 #
-# To make majors arrive as their own reviewable PRs instead of inside the
-# grouped PR, add `update-types: ["minor", "patch"]` to a group below; majors
-# then flow as individual PRs while minor/patch stay batched.
+# The root npm entry is intentionally UNGROUPED: Dependabot computes an
+# out-of-sync root package-lock.json for multi-dependency update PRs in this
+# npm-workspaces/single-lockfile layout (npm ci fails EUSAGE; see broken PRs
+# #151/#157/#199/#202). Individual PRs are the only shape that lands. Note
+# Dependabot manifest-bump PRs for exact-pinned direct deps still arrive red
+# and are carried manually; lockfile-only security PRs remain auto-mergeable.
 version: 2
 
 updates:
   # ── Root npm workspace graph (apps/* + packages/*, single root lockfile) ─────
   # Dependabot detects the workspaces from the root package.json + lockfile and
-  # proposes updates across every workspace. Two groups => one PR for runtime
-  # deps and one for dev/tooling, each including majors.
+  # proposes updates across every workspace. UNGROUPED — see header rationale.
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
@@ -34,11 +35,6 @@ updates:
       # .mise.toml + engines when the runtime moves, then drop this rule.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
-    groups:
-      production-dependencies:
-        dependency-type: "production"
-      development-dependencies:
-        dependency-type: "development"
 
   # ── Standalone migration tool (own lockfile, OUTSIDE the npm workspaces) ─────
   # Optional: remove this block if you don't want PRs for the one-time SQL->Blob
