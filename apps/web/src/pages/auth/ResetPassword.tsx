@@ -61,7 +61,7 @@ export default function ResetPassword() {
     setBusy(true);
     setError(null);
     try {
-      await api.post("auth/reset-password", { token, password });
+      await api.post("auth/reset-password", { token, newPassword: password });
       setDone(true);
     } catch (ex) {
       setError(ex instanceof Error ? ex.message : "Reset failed. The link may have expired.");

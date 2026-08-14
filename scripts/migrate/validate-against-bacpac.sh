@@ -19,7 +19,16 @@
 # then STAGING_BLOB_ACCOUNT. Connection strings therefore win over identity.
 # With none set, the existing local Azurite connection-string default is used.
 # Use --print-config to validate the selected downstream configuration without
-# contacting SQL or Azure; connection strings are masked in this output.
+# contacting SQL or Azure; only non-secret target summaries are printed.
+#
+# SECURITY: this script always restores BACPAC_TARGET_CONN via sqlpackage,
+# which is invoked with the SQL target connection string as a command-line
+# argument. Any password it contains is briefly visible in the process table
+# (`ps`, /proc/<pid>/cmdline) to other local users on this machine, for the
+# duration of the import. This is a documented sqlpackage limitation, not a bug
+# in this script (see the comment above the sqlpackage call for detail). On a
+# shared or multi-user host, prefer a BACPAC_TARGET_CONN using
+# Authentication=Active Directory Managed Identity, which carries no password.
 
 set -euo pipefail
 
@@ -34,14 +43,8 @@ fail() {
   exit 1
 }
 
-mask_connection_string() {
-  node -e '
-    const value = process.argv[1] || "";
-    console.log(value
-      .replace(/Password=[^;]+/gi, "Password=***")
-      .replace(/AccountKey=[^;]+/gi, "AccountKey=***")
-      .replace(/SharedAccessSignature=[^?&"\x27\s]+/gi, "SharedAccessSignature=***"));
-  ' "${1:-}"
+connection_summary() {
+  CONNECTION_STRING_TO_SUMMARIZE="${2:-}" node "$SCRIPT_DIR/connectionSummary.mjs" "$1"
 }
 
 BACPAC_BLOB_CONN_VALUE="${BACPAC_BLOB_CONN:-${STAGING_BLOB_CONN:-}}"
@@ -71,20 +74,20 @@ with_staging_blob_auth() {
 print_config() {
   local selected_config target
   if [[ -n "$BACPAC_BLOB_CONN_VALUE" ]]; then
-    target="$(mask_connection_string "$BACPAC_BLOB_CONN_VALUE")"
+    target="$(connection_summary storage "$BACPAC_BLOB_CONN_VALUE")"
     selected_config="$(with_staging_blob_auth node -e '
       const connection = Reflect.get(process.env, "BLOB_CONNECTION_STRING");
       const account = Reflect.get(process.env, "BLOB_STORAGE_ACCOUNT_NAME");
       if (!connection || account) process.exit(1);
-      process.stdout.write("BLOB_CONNECTION_STRING=" + process.argv[1] + "; BLOB_STORAGE_ACCOUNT_NAME=<unset>");
-    ' "$target")"
+      process.stdout.write("BLOB_CONNECTION_STRING=<configured>; BLOB_STORAGE_ACCOUNT_NAME=<unset>");
+    ')"
     printf 'Selected BACPAC blob auth: connection string (%s)\n' "$BACPAC_BLOB_AUTH_SOURCE"
     printf 'Blob target: %s\n' "$target"
     printf 'Container setup env: %s\n' "$selected_config"
     printf 'Migration env: %s\n' "$selected_config"
     printf 'Validation env: %s\n' "$selected_config"
     printf 'Cleanup env: %s\n' "$selected_config"
-    printf 'Privacy scan: --source %s; BLOB_STORAGE_ACCOUNT_NAME=<unset>\n' "$target"
+    printf 'Privacy scan env: %s; --source omitted\n' "$selected_config"
   else
     selected_config="$(with_staging_blob_auth node -e '
       const connection = Reflect.get(process.env, "BLOB_CONNECTION_STRING");
@@ -242,9 +245,9 @@ mkdir -p "$TMP_DIR"
 
 printf '=== BCC BACPAC migration validation ===\n'
 printf 'BACPAC: %s\n' "$BACPAC_PATH_ABS"
-printf 'SQL target: %s\n' "$(mask_connection_string "$BACPAC_TARGET_CONN")"
+printf 'SQL target: %s\n' "$(connection_summary sql "$BACPAC_TARGET_CONN")"
 if [[ -n "$BACPAC_BLOB_CONN_VALUE" ]]; then
-  printf 'Blob target: %s\n' "$(mask_connection_string "$BACPAC_BLOB_CONN_VALUE")"
+  printf 'Blob target: %s\n' "$(connection_summary storage "$BACPAC_BLOB_CONN_VALUE")"
 else
   printf 'Blob target: account=%s (DefaultAzureCredential)\n' "$BACPAC_BLOB_ACCOUNT_VALUE"
 fi
@@ -253,6 +256,16 @@ printf 'Private container: %s\n' "$PRIVATE_CONTAINER"
 printf 'State dir: %s/.migration-state\n\n' "$TMP_DIR"
 
 printf 'Step 1/6: restoring BACPAC to throwaway DB with sqlpackage...\n'
+# KNOWN, DOCUMENTED EXPOSURE: sqlpackage accepts its target only as a
+# command-line parameter, so BACPAC_TARGET_CONN (including any password it
+# carries) is visible in the process table (`ps`, /proc/<pid>/cmdline) to any
+# local user for the duration of this import. /Profile: is not supported for
+# /Action:Import, and sqlpackage has no env-var or stdin alternative for
+# TargetConnectionString. The only way to avoid a secret here entirely is an
+# Entra managed-identity connection string
+# (Authentication=Active Directory Managed Identity), which carries no
+# password. See scripts/migrate/__tests__/connection-disclosure.test.mjs for
+# the storage-only argv assertion and this documented exception.
 sqlpackage /Action:Import /SourceFile:"$BACPAC_PATH_ABS" /TargetConnectionString:"$BACPAC_TARGET_CONN"
 
 printf 'Step 2/6: creating fresh throwaway blob containers...\n'
@@ -300,13 +313,8 @@ printf 'Step 5/6: running reconcile.mjs and asserting no anomalies...\n'
 printf 'Step 6/6: running privacy-scan.mjs against the public throwaway container...\n'
 (
   cd "$TMP_DIR"
-  if [[ -n "$BACPAC_BLOB_CONN_VALUE" ]]; then
-    with_staging_blob_auth env BLOB_CONTAINER_NAME="$PUBLIC_CONTAINER" \
-      node "$REPO_ROOT/scripts/privacy-scan.mjs" --source "$BACPAC_BLOB_CONN_VALUE"
-  else
-    with_staging_blob_auth env BLOB_CONTAINER_NAME="$PUBLIC_CONTAINER" \
-      node "$REPO_ROOT/scripts/privacy-scan.mjs"
-  fi
+  with_staging_blob_auth env BLOB_CONTAINER_NAME="$PUBLIC_CONTAINER" \
+    node "$REPO_ROOT/scripts/privacy-scan.mjs"
 )
 
 printf '\nBACPAC validation PASSED: real migration blobs satisfy schema gate, reconcile, and privacy scan.\n'

@@ -74,7 +74,10 @@ don't re-read the source.
 - `signAccessToken` (1h), `signRefreshToken` (30d), `verifyRefreshToken`.
 - `hashPassword`/`verifyPassword` (bcrypt; `TEST_BCRYPT_COST` honored only in test env).
 - `generateShortLivedToken` / `consumeShortLivedToken` — one-shot via ETag CAS →
-  `TokenNotFound/Expired/AlreadyConsumed` errors. `lookupUserByEmail`, `getAppUrl()`.
+  `TokenNotFound/Expired/AlreadyConsumed` errors. `lookupUserByEmail`.
+- `getAppUrl()` supplies the public origin for verification/reset email links with precedence
+  `APP_URL` → `WEBSITE_HOSTNAME` (prefixed with `https://`) →
+  `http://localhost:5173`; local development therefore does not require `APP_URL`.
 
 ## recompute.ts
 

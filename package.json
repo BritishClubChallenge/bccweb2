@@ -16,6 +16,7 @@
     "license:check": "node scripts/spdx-header.mjs",
     "license:fix": "node scripts/spdx-header.mjs --fix",
     "license:test": "node --test scripts/__tests__/spdx-header.test.mjs",
+    "iac:app-url-contract": "bash scripts/iac/check-app-url-contract.sh",
     "iac:platform-contract": "bash scripts/iac/check-shared-resource-contract.sh",
     "iac:stamp-storage-split": "bash scripts/iac/check-stamp-storage-split.sh",
     "fixtures:audit": "node scripts/audit-fixtures.mjs --json",

@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
-import { describe, test, expect } from "vitest";
+import { afterEach, describe, test, expect } from "vitest";
 import crypto from "crypto";
 import {
   generateShortLivedToken,
   consumeShortLivedToken,
+  getAppUrl,
   TokenNotFoundError,
   TokenExpiredError,
   TokenAlreadyConsumedError,
@@ -12,6 +13,51 @@ import {
 import type { AuthToken } from "../lib/authHelpers.js";
 import { getPrivateContainer } from "./helpers/azurite.js";
 import { writePrivateJson } from "./helpers/seed.js";
+
+const originalAppUrl = process.env["APP_URL"];
+const originalWebsiteHostname = process.env["WEBSITE_HOSTNAME"];
+
+function restoreEnv(name: "APP_URL" | "WEBSITE_HOSTNAME", value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}
+
+afterEach(() => {
+  restoreEnv("APP_URL", originalAppUrl);
+  restoreEnv("WEBSITE_HOSTNAME", originalWebsiteHostname);
+});
+
+describe("getAppUrl", () => {
+  test.each(["https://x.example.test", "https://x.example.test/"])(
+    "APP_URL %s wins and produces one slash before an auth path",
+    (appUrl) => {
+      process.env["APP_URL"] = appUrl;
+      process.env["WEBSITE_HOSTNAME"] = "func.example.test";
+
+      expect(getAppUrl()).toBe("https://x.example.test");
+      expect(`${getAppUrl()}/verify-email?token=sentinel`).toBe(
+        "https://x.example.test/verify-email?token=sentinel",
+      );
+    },
+  );
+
+  test("WEBSITE_HOSTNAME is prefixed with https when APP_URL is unset", () => {
+    delete process.env["APP_URL"];
+    process.env["WEBSITE_HOSTNAME"] = "func.example.test";
+
+    expect(getAppUrl()).toBe("https://func.example.test");
+  });
+
+  test("localhost Vite origin is used when neither deployment setting exists", () => {
+    delete process.env["APP_URL"];
+    delete process.env["WEBSITE_HOSTNAME"];
+
+    expect(getAppUrl()).toBe("http://localhost:5173");
+  });
+});
 
 async function seedAuthCredential(userId: string, tokenVersion = 0): Promise<void> {
   await writePrivateJson(`auth/${userId}.json`, {

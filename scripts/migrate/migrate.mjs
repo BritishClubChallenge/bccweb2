@@ -62,6 +62,7 @@ import { createTally, normalizeCoachType, normalizePilotRating, normalizeRoundSt
 import { assertSeasonYear, briefImageBlobFromLegacy, briefImagePath, ensureNonEmpty, normalizeWebsiteUrl, parseFrequencyMhz, manufacturerFromLegacyRow, legacySignaturePath, legacyMigratedSignature, pilotSummaryFromMigration } from "./transforms.mjs";
 import { legacyScoreManifestPath, writeLegacyScoreManifest } from "./legacy-score-manifest.mjs";
 import { createBlobServiceClient } from "./blobClient.mjs";
+import { summarizeSqlConnectionString } from "./connectionSummary.mjs";
 
 // ─── CLI flags ────────────────────────────────────────────────────────────────
 
@@ -75,16 +76,6 @@ const FORCE_PRODUCTION = argv.includes("--force-production");
 const SQL_CS = process.env.SQL_CONNECTION_STRING;
 const CONTAINER = process.env.BLOB_CONTAINER ?? "data";
 const PRIVATE_CONTAINER = process.env.BLOB_PRIVATE_CONTAINER ?? "data-private";
-
-// ─── Log masking ─────────────────────────────────────────────────────────────
-
-function maskConnectionString(s) {
-  return s
-    .replace(/Password=[^;]+/gi, "Password=***")
-    .replace(/AccountKey=[^;]+/gi, "AccountKey=***")
-    .replace(/SharedAccessSignature=[^?&"'\s]+/gi, "SharedAccessSignature=***")
-    .replace(/Authorization:\s*\S+/gi, "Authorization:***");
-}
 
 // ─── Blob helpers ─────────────────────────────────────────────────────────────
 
@@ -228,7 +219,7 @@ async function main() {
   }
 
   console.log("BCCWeb SQL → Blob Migration");
-  console.log(`  SQL: ${maskConnectionString(SQL_CS)}`);
+  console.log(`  SQL: ${JSON.stringify(summarizeSqlConnectionString(SQL_CS))}`);
   console.log(`  Blob container (public):  ${CONTAINER}`);
   console.log(`  Blob container (private): ${PRIVATE_CONTAINER}`);
   if (DRY_RUN) console.log("  DRY RUN — no blobs will be written");

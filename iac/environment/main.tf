@@ -31,6 +31,7 @@ module "stamp" {
   stamp_name            = var.stamp_name
   stamp_rg_name         = var.stamp_rg_name
   location              = var.location
+  app_url               = var.app_url
   allowed_origins       = var.allowed_origins
   operator_principal_id = data.terraform_remote_state.shared.outputs.env_umi_principal_ids[var.stamp_name]
   storage_sku           = local.storage_sku

@@ -15,8 +15,11 @@ secure-by-default model when first applied.
 
 Cut staging over with one `environment/staging` apply through the manual `terraform.yml`
 workflow (or locally), then redeploy the application; a brief interruption is acceptable.
-Rollback is `git revert`, re-apply, and redeploy the prior artifact. This is the complete
-recovery procedure.
+A plain `git revert` of the secure-storage change is not a safe rollback — Azure does not
+reset `allowSharedKeyAccess` just because Terraform stops managing it. Recovery
+re-enables Shared Key deliberately before restoring key-based Function settings and
+redeploying the prior artifact — see
+[../../iac/README.md](../../iac/README.md#staging-storage-cutover-and-rollback).
 
 ## Preconditions
 

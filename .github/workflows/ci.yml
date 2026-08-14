@@ -183,6 +183,9 @@ jobs:
       - name: Check workload location contract
         run: bash scripts/iac/check-workload-location-contract.sh
 
+      - name: Check app URL contract
+        run: npm run iac:app-url-contract
+
       - name: Check shared Terraform resource contract
         run: bash scripts/iac/check-shared-resource-contract.sh
 

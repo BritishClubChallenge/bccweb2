@@ -46,17 +46,25 @@ describe("reconcile.mjs", () => {
     const snapshotPath = join(cwd, ".migration-state", "snapshot.json");
     writeJson(snapshotPath, { expectedCounts: { club: 2, pilot: 1 } });
 
+    const sqlPasswordSuffix = "sql-password-suffix-that-must-not-appear";
+    const accountKey = "blob-account-key-that-must-not-appear";
     const result = runReconcile(cwd, ["--against-prod-snapshot", snapshotPath], {
-      PROD_SQL_CONN: "Server=tcp:bcc-prod;User Id=sa;Password=secret;",
-      PROD_BLOB_CONN: "DefaultEndpointsProtocol=https;AccountName=p;AccountKey=secret;",
+      PROD_SQL_CONN: `Server=tcp:bcc-prod;Database=Bcc;User Id=sa;Password=p@ss;${sqlPasswordSuffix};`,
+      PROD_BLOB_CONN: `DefaultEndpointsProtocol=https;AccountName=prodaccount;AccountKey=${accountKey};`,
     });
 
     assert.equal(result.status, 0);
     const reportPath = join(cwd, ".migration-state", "prod-dryrun-report.json");
     assert.equal(existsSync(reportPath), true);
-    const report = JSON.parse(readFileSync(reportPath, "utf8"));
-    assert.equal(report.source.sqlConn, "Server=tcp:bcc-prod;User Id=sa;Password=***;");
-    assert.equal(report.source.blobConn, "DefaultEndpointsProtocol=https;AccountName=p;AccountKey=***;");
+    const reportText = readFileSync(reportPath, "utf8");
+    const report = JSON.parse(reportText);
+    assert.deepEqual(report.source.sql, { server: "tcp:bcc-prod", database: "Bcc" });
+    assert.deepEqual(report.source.blob, {
+      accountName: "prodaccount",
+      endpoint: "https://prodaccount.blob.core.windows.net",
+    });
+    assert.equal(reportText.includes(sqlPasswordSuffix), false);
+    assert.equal(reportText.includes(accountKey), false);
     assert.deepEqual({
       perEntity: report.perEntity,
       discarded: report.discarded,
@@ -121,10 +129,49 @@ describe("reconcile.mjs", () => {
     const report = JSON.parse(
       readFileSync(join(cwd, ".migration-state", "prod-dryrun-report.json"), "utf8"),
     );
-    assert.equal(
-      report.source.blobConn,
-      "https://stbccwebstagingdata.blob.core.windows.net",
+    assert.deepEqual(
+      report.source.blob,
+      {
+        accountName: "stbccwebstagingdata",
+        endpoint: "https://stbccwebstagingdata.blob.core.windows.net",
+      },
     );
+  });
+
+  test("report excludes quoted and braced SQL passwords and a full SAS signature", () => {
+    const cases = [
+      {
+        passwordMarker: "quoted-password-tail-that-must-not-appear",
+        sql: 'Server=quoted.example;Database=QuotedDb;Password="start;quoted-password-tail-that-must-not-appear";',
+      },
+      {
+        passwordMarker: "braced-password-tail-that-must-not-appear",
+        sql: "Server=braced.example;Database=BracedDb;Password={start;braced-password-tail-that-must-not-appear};",
+      },
+    ];
+
+    for (const [index, sqlCase] of cases.entries()) {
+      const cwd = makeWorkspace();
+      writeJson(join(cwd, ".migration-state", "id-map.json"), { "club:1": "club-uuid-1" });
+      const snapshotPath = join(cwd, ".migration-state", "snapshot.json");
+      writeJson(snapshotPath, { expectedCounts: { club: 1 } });
+      const signature = `report-signature-${index}-that-must-not-appear%3D`;
+      const blob = "BlobEndpoint=https://prodaccount.blob.core.windows.net/;" +
+        `SharedAccessSignature=sv=2026-01-01&ss=b&srt=sco&sp=racwdl&se=2027-01-01&sig=${signature}`;
+
+      const result = runReconcile(cwd, ["--against-prod-snapshot", snapshotPath], {
+        PROD_SQL_CONN: sqlCase.sql,
+        PROD_BLOB_CONN: blob,
+      });
+      const reportText = readFileSync(
+        join(cwd, ".migration-state", "prod-dryrun-report.json"),
+        "utf8",
+      );
+
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.equal(reportText.includes(sqlCase.passwordMarker), false);
+      assert.equal(reportText.includes(signature), false);
+    }
   });
 
   test("--discarded-counts integration (T32)", () => {

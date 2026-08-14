@@ -16,8 +16,11 @@ Production is not deployed; it becomes secure by default when first applied.
 
 For staging, make the cutover with one `environment/staging` apply through the manual
 `terraform.yml` workflow (or locally), then redeploy the application. A brief staging
-interruption is acceptable. Rollback means `git revert`, re-apply, and redeploy the prior
-artifact. This is the complete recovery procedure.
+interruption is acceptable. A plain `git revert` of the secure-storage change is not a
+safe rollback — Azure does not reset `allowSharedKeyAccess` just because Terraform stops
+managing it. Recovery re-enables Shared Key deliberately before restoring key-based
+Function settings and redeploying the prior artifact — see
+[../../iac/README.md](../../iac/README.md#staging-storage-cutover-and-rollback).
 
 ## When to Run
 

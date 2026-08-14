@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
 import crypto from "crypto";
-import { describe, expect, test, vi, beforeEach } from "vitest";
+import { afterEach, describe, expect, test, vi, beforeEach } from "vitest";
 import type { User } from "@bccweb/types";
-import { getRegisteredHandler } from "../../__tests__/helpers/setup.js";
+import { getRegisteredHandler, getSentEmails } from "../../__tests__/helpers/setup.js";
 import { makeRequest } from "../../__tests__/helpers/api.js";
 import { getPrivateContainer } from "../../__tests__/helpers/azurite.js";
 import { makeUser, privateBlobExists, readPrivateJson, writePrivateJson } from "../../__tests__/helpers/seed.js";
@@ -24,6 +24,27 @@ const registerResponse = {
   message:
     "If this email is not yet registered, you will receive a verification link shortly.",
 };
+
+const PUBLIC_ORIGIN = "https://public.example.test";
+const FUNCTION_HOST = "func.example.test";
+const originalAppUrl = process.env["APP_URL"];
+const originalWebsiteHostname = process.env["WEBSITE_HOSTNAME"];
+
+function expectPublicVerificationLink(email: { html?: string; text?: string }): void {
+  const expectedPrefix = `${PUBLIC_ORIGIN}/verify-email?token=`;
+  expect(email.html).toContain(expectedPrefix);
+  expect(email.text).toContain(expectedPrefix);
+  expect(email.html).not.toContain(FUNCTION_HOST);
+  expect(email.text).not.toContain(FUNCTION_HOST);
+}
+
+function restoreEnv(name: "APP_URL" | "WEBSITE_HOSTNAME", value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}
 
 function verificationStatePath(userId: string): string {
   return `auth/verification-state/${userId}.json`;
@@ -58,8 +79,15 @@ async function listPrivateBlobNames(prefix: string): Promise<string[]> {
 
 describe("auth register enumeration neutralization", () => {
   beforeEach(() => {
+    process.env["APP_URL"] = PUBLIC_ORIGIN;
+    process.env["WEBSITE_HOSTNAME"] = FUNCTION_HOST;
     vi.mocked(sendEmail).mockClear();
     vi.mocked(lookupUserByEmail).mockClear();
+  });
+
+  afterEach(() => {
+    restoreEnv("APP_URL", originalAppUrl);
+    restoreEnv("WEBSITE_HOSTNAME", originalWebsiteHostname);
   });
 
   test("register with new email: 202 + verification email sent", async () => {
@@ -77,6 +105,7 @@ describe("auth register enumeration neutralization", () => {
     expect(res.status).toBe(202);
     expect(res.jsonBody).toEqual(registerResponse);
     expect(vi.mocked(sendEmail)).toHaveBeenCalledTimes(1);
+    expectPublicVerificationLink(getSentEmails()[0]);
 
     const userIndex = await readPrivateJson<Record<string, string>>("user-index.json");
     const userId = userIndex?.[email.toLowerCase()];
@@ -152,6 +181,10 @@ describe("auth register enumeration neutralization", () => {
     expect(res.status).toBe(202);
     expect(res.jsonBody).toEqual(registerResponse);
     expect(vi.mocked(sendEmail)).toHaveBeenCalledTimes(1);
+    const sentEmail = getSentEmails()[0];
+    expectPublicVerificationLink(sentEmail);
+    expect(sentEmail.html).toContain("fresh-verification-token");
+    expect(sentEmail.text).toContain("fresh-verification-token");
   });
 
   test("register with existing verified email: 202 + zero emails sent", async () => {
