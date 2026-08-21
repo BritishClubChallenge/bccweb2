@@ -73,6 +73,7 @@ import {
 } from "../lib/puretrackStatus.js";
 import { getTelemetryClient } from "../lib/telemetry.js";
 import { listSignaturesForRound } from "../lib/signTofly/ledger.js";
+import { findUnsignedSlots } from "../lib/signTofly/completeness.js";
 import { invalidatePriorSignToFlyFlags } from "../lib/signTofly/invalidate.js";
 import { computeBriefHash, MATERIAL_BRIEF_FIELDS } from "../lib/signTofly/briefVersion.js";
 
@@ -969,7 +970,7 @@ async function mergeBriefForLock(
 /**
  * BriefComplete → Locked.
  * Takes a snapshot of each registered pilot's safety/scoring data from
- * their pilot document. Resets accountedFor and signToFly for all slots.
+ * their pilot document. Resets accountedFor for all slots; preserves signToFly.
  * After the lock is confirmed, enqueues PureTrack-group and PDF jobs.
  */
 async function lockRound(
@@ -1060,7 +1061,6 @@ async function lockRound(
         slot.snapshot = snapshotMap.get(slot.pilotId)!;
       }
       slot.accountedFor = false;
-      slot.signToFly = false;
     }
   }
 
@@ -1119,6 +1119,23 @@ async function lockRound(
         );
       }
 
+      // Every Filled slot must hold a signature at the current brief version
+      // before the round may lock. The list runs inside the round+brief lease so
+      // a concurrent sign cannot interleave between this check and the commit;
+      // it uses the leased round `r` and the frozen brief `existing`.
+      const signatures = await listSignaturesForRound(id);
+      const unsigned = findUnsignedSlots(r, existing, signatures);
+      if (unsigned.length > 0) {
+        throw new HttpError(
+          409,
+          "SIGNATURES_INCOMPLETE",
+          "Unsigned slots: " +
+            unsigned
+              .map((s) => `${s.teamName} #${s.placeInTeam} (${s.pilotId})`)
+              .join("; "),
+        );
+      }
+
       // Hard failure: if the frozen brief JSON cannot be written, the round must
       // NOT advance to Locked. This write throws on failure, so the round write
       // that follows never runs and the round stays BriefComplete.
@@ -1143,7 +1160,6 @@ async function lockRound(
             slot.snapshot = snapshotMap.get(slot.pilotId)!;
           }
           slot.accountedFor = false;
-          slot.signToFly = false;
         }
       }
 
