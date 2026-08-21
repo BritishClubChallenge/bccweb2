@@ -73,6 +73,7 @@ import {
 } from "../../lib/puretrackGuard.js";
 import { PureTrackGroupJobSchema } from "../../lib/queue.js";
 import { computeBriefHash } from "../../lib/signTofly/briefVersion.js";
+import { writeSignature } from "../../lib/signTofly/ledger.js";
 import "../puretrack.js";
 import "../puretrackGroups.js";
 import "../rounds.js";
@@ -291,6 +292,24 @@ async function seedFixture(input: {
     : brief;
   await writePrivateJson(`rounds/${roundId}.json`, round);
   await writePrivateJson(`round-briefs/${roundId}.json`, persistedBrief);
+  if (round.status === "BriefComplete") {
+    await writeSignature({
+      id: randomUUID(),
+      roundId,
+      teamId,
+      place: 1,
+      pilotId: pilot.id,
+      userId: admin.id,
+      signedAt: new Date().toISOString(),
+      briefVersion: 1,
+      briefHash: persistedBrief.hash!,
+      wordingVersion: 1,
+      wordingHash: "f3-wording-hash",
+      ip: "203.0.113.3",
+      userAgent: "f3-fixture",
+      source: "pilot-self",
+    });
+  }
   if (priorIds !== undefined) {
     await seedGroupRecord(roundId, pilot.id, priorIds[0]);
     await seedGroupRecord(roundId, pilot.id, priorIds[1], teamId);
