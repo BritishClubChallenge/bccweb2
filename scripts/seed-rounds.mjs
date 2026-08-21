@@ -79,6 +79,39 @@ async function replacePriorRounds(manifest) {
   await writeJsonAtomically(FIXTURE_MANIFEST_PATH, manifest);
 }
 
+// Seed the sign-to-fly signature for every Filled slot of the round's teams via
+// the coord sign-override endpoint, so the lock gate (which blocks locks on any
+// unsigned Filled slot at the current brief version) can pass. The script knows
+// the team IDs and Filled pilots from the registration loop above — no extra API
+// read is needed. The fixed reason satisfies the endpoint's ≥20-char rule.
+const SIGN_OVERRIDE_REASON = "Seed script: browsing-data signature for locked fixture";
+
+function explainHttpError(err) {
+  const status = err?.status ?? "unknown";
+  const body = err?.body ?? err?.message ?? String(err);
+  return `HTTP ${status} ${body}`;
+}
+
+async function signFilledSlots(callApi, adminToken, roundId, registeredTeams) {
+  for (const { teamId, teamName, pilots } of registeredTeams) {
+    for (let placeIndex = 0; placeIndex < pilots.length; placeIndex += 1) {
+      const place = placeIndex + 1;
+      const pilot = pilots[placeIndex];
+      const path = `/api/rounds/${roundId}/teams/${teamId}/pilots/${place}/sign-override`;
+      try {
+        await callApi("POST", path, {
+          token: adminToken,
+          body: { reason: SIGN_OVERRIDE_REASON, onBehalfOfPilotId: pilot.id },
+        });
+      } catch (err) {
+        fail(
+          `sign-override failed round=${roundId} team=${teamName} place=${place} pilot=${pilot.id}: ${explainHttpError(err)}`,
+        );
+      }
+    }
+  }
+}
+
 async function transitionRound(callApi, token, roundId, targetStatus) {
   if (targetStatus !== "Proposed") {
     await callApi("POST", `/api/rounds/${roundId}/confirm`, { token, body: {} });
@@ -86,12 +119,18 @@ async function transitionRound(callApi, token, roundId, targetStatus) {
   if (targetStatus === "BriefComplete" || targetStatus === "Locked") {
     await callApi("POST", `/api/rounds/${roundId}/brief-complete`, { token, body: {} });
   }
-  if (targetStatus === "Locked") {
+}
+
+async function lockRound(callApi, token, roundId) {
+  try {
     await callApi("POST", `/api/rounds/${roundId}/lock`, { token, body: {} });
+  } catch (err) {
+    fail(`lock failed for round ${roundId}: ${explainHttpError(err)}`);
   }
 }
 
 async function seedRound(callApi, manifest, adminToken, pilotTokens, selected, statusIndex) {
+  const targetStatus = TARGET_STATUSES[statusIndex];
   const created = await callApi("POST", "/api/rounds", {
     token: adminToken,
     body: {
@@ -105,6 +144,7 @@ async function seedRound(callApi, manifest, adminToken, pilotTokens, selected, s
   const roundId = created.id;
   await persistSeedOwnership(manifest, roundId);
 
+  const registeredTeams = [];
   for (const { team, pilots } of selected.teams) {
     const round = await callApi("POST", `/api/rounds/${roundId}/teams`, {
       token: adminToken,
@@ -120,8 +160,18 @@ async function seedRound(callApi, manifest, adminToken, pilotTokens, selected, s
         body: { teamId: added.id },
       });
     }
+    registeredTeams.push({ teamId: added.id, teamName: team.teamName, pilots });
   }
-  await transitionRound(callApi, adminToken, roundId, TARGET_STATUSES[statusIndex]);
+  if (targetStatus === "Locked") {
+    // The sign-override endpoint requires BriefComplete; advance to that, then
+    // sign every Filled slot, then lock. Doing sign before confirm/brief leaves
+    // the round in Proposed and the gate then 409s on the sign call.
+    await transitionRound(callApi, adminToken, roundId, "BriefComplete");
+    await signFilledSlots(callApi, adminToken, roundId, registeredTeams);
+    await lockRound(callApi, adminToken, roundId);
+    return;
+  }
+  await transitionRound(callApi, adminToken, roundId, targetStatus);
 }
 
 async function main() {
