@@ -73,6 +73,9 @@ import {
 } from "../lib/puretrackStatus.js";
 import { getTelemetryClient } from "../lib/telemetry.js";
 import { listSignaturesForRound } from "../lib/signTofly/ledger.js";
+import { findUnsignedSlots } from "../lib/signTofly/completeness.js";
+import { materializeSignToFly } from "../lib/signTofly/reflect.js";
+import { slotKey } from "../lib/signTofly/slotSignatureVersions.js";
 import { invalidatePriorSignToFlyFlags } from "../lib/signTofly/invalidate.js";
 import { computeBriefHash, MATERIAL_BRIEF_FIELDS } from "../lib/signTofly/briefVersion.js";
 
@@ -589,7 +592,7 @@ function freezeBriefAndCountInvalidations(
   const signedBefore = new Map<string, boolean>();
   for (const team of round.teams) {
     for (const slot of team.pilots) {
-      signedBefore.set(`${team.id}:${slot.placeInTeam}`, slot.signToFly);
+      signedBefore.set(slotKey(team.id, slot.placeInTeam), slot.signToFly);
     }
   }
   invalidatePriorSignToFlyFlags(round, brief, signatures);
@@ -597,7 +600,7 @@ function freezeBriefAndCountInvalidations(
   for (const team of round.teams) {
     for (const slot of team.pilots) {
       if (
-        signedBefore.get(`${team.id}:${slot.placeInTeam}`) === true &&
+        signedBefore.get(slotKey(team.id, slot.placeInTeam)) === true &&
         slot.signToFly === false
       ) {
         invalidatedSignatureCount += 1;
@@ -969,7 +972,7 @@ async function mergeBriefForLock(
 /**
  * BriefComplete → Locked.
  * Takes a snapshot of each registered pilot's safety/scoring data from
- * their pilot document. Resets accountedFor and signToFly for all slots.
+ * their pilot document. Resets accountedFor for all slots; preserves signToFly.
  * After the lock is confirmed, enqueues PureTrack-group and PDF jobs.
  */
 async function lockRound(
@@ -1060,7 +1063,6 @@ async function lockRound(
         slot.snapshot = snapshotMap.get(slot.pilotId)!;
       }
       slot.accountedFor = false;
-      slot.signToFly = false;
     }
   }
 
@@ -1119,6 +1121,55 @@ async function lockRound(
         );
       }
 
+      // Every Filled slot must hold a signature at the current brief version
+      // before the round may lock, checked against the leased round `r` and the
+      // frozen brief `existing` rather than the candidate.
+      //
+      // The signing handlers take NO lease — signatures.ts appends to the ledger
+      // directly — so a signature can land between this listing and the commit.
+      // That is safe because the ledger is append-only: a listing can only miss
+      // a new signature, never lose one it saw, so the race yields at worst a
+      // spurious 409 that succeeds on retry, and never a lock admitted on
+      // signatures this check did not see. The round+brief lease held here does
+      // exclude concurrent reopen (`transition` takes the round lease) and brief
+      // edits, which is what the hash check above depends on.
+      let signatures: Signature[];
+      try {
+        signatures = await listSignaturesForRound(id);
+      } catch {
+        // The outer catch turns anything that is not an HttpError into
+        // BRIEF_PERSIST_FAILED and tells the operator to reopen and re-complete.
+        // Nothing has been persisted yet here, and that advice does not repair an
+        // unreadable or malformed ledger, so report the real cause. The
+        // underlying error is deliberately not echoed — it can carry storage
+        // paths.
+        throw new HttpError(
+          500,
+          "SIGNATURE_LEDGER_UNAVAILABLE",
+          "Could not read the sign-to-fly ledger while locking — the round remains BriefComplete; retry once the ledger is readable",
+        );
+      }
+      const unsigned = findUnsignedSlots(r, existing, signatures);
+      if (unsigned.length > 0) {
+        throw new HttpError(
+          409,
+          "SIGNATURES_INCOMPLETE",
+          "Unsigned slots: " +
+            unsigned
+              .map((s) => `${s.teamName} #${s.placeInTeam} (${s.pilotId})`)
+              .join("; "),
+        );
+      }
+
+      // Write the ledger result onto the slots before the round leaves
+      // BriefComplete. `slot.signToFly` is materialized asynchronously off the
+      // signtofly-reflect queue, so it can still be false here even though every
+      // Filled slot is signed — and `reflectRoundSignToFly` early-returns for
+      // non-BriefComplete rounds, so a reflect job that lands after this write
+      // would be a no-op and the stale false would become permanent. The gate
+      // above has already proven the ledger under this same lease, so reuse it.
+      materializeSignToFly(r, existing, signatures);
+
       // Hard failure: if the frozen brief JSON cannot be written, the round must
       // NOT advance to Locked. This write throws on failure, so the round write
       // that follows never runs and the round stays BriefComplete.
@@ -1143,7 +1194,6 @@ async function lockRound(
             slot.snapshot = snapshotMap.get(slot.pilotId)!;
           }
           slot.accountedFor = false;
-          slot.signToFly = false;
         }
       }
 

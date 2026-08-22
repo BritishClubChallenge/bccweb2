@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
 import { randomUUID } from "node:crypto";
-import type { Round, RoundBrief, Season } from "@bccweb/types";
+import type { Round, RoundBrief, Season, Signature } from "@bccweb/types";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { invoke, makeAuthRequest } from "../../__tests__/helpers/api.js";
@@ -14,6 +14,7 @@ import {
   writePublicJson,
 } from "../../__tests__/helpers/seed.js";
 import { computeBriefHash } from "../../lib/signTofly/briefVersion.js";
+import { overrideSignaturePath, writeSignature, writeSignatureToPath } from "../../lib/signTofly/ledger.js";
 import * as pureTrack from "../../lib/puretrack.js";
 
 const blobWriteControl = vi.hoisted(() => ({
@@ -79,7 +80,7 @@ interface Ctx {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-async function seedBriefCompleteRound(): Promise<Ctx> {
+async function seedBriefCompleteRound(opts: { seedSignature?: boolean } = {}): Promise<Ctx> {
   const year = 3000 + Math.floor(Math.random() * 6_000);
   const clubId = randomUUID();
   const pilotId = randomUUID();
@@ -159,7 +160,12 @@ async function seedBriefCompleteRound(): Promise<Ctx> {
     },
   ]);
 
-  return { roundId, teamId, pilotId, adminUserId: admin.id, adminEmail: admin.email, clubId, year };
+  const ctx = { roundId, teamId, pilotId, adminUserId: admin.id, adminEmail: admin.email, clubId, year };
+  if (opts.seedSignature !== false) {
+    await seedCurrentSignature(ctx);
+  }
+
+  return ctx;
 }
 
 function makeBrief(ctx: Ctx, overrides: Partial<RoundBrief> = {}): RoundBrief {
@@ -191,6 +197,26 @@ function makeBrief(ctx: Ctx, overrides: Partial<RoundBrief> = {}): RoundBrief {
 function frozenBrief(ctx: Ctx, overrides: Partial<RoundBrief> = {}): RoundBrief {
   const brief = makeBrief(ctx, overrides);
   return { ...brief, hash: computeBriefHash(brief) };
+}
+
+async function seedCurrentSignature(ctx: Ctx, placeInTeam = 1): Promise<void> {
+  const signature: Signature = {
+    id: randomUUID(),
+    roundId: ctx.roundId,
+    teamId: ctx.teamId,
+    place: placeInTeam,
+    pilotId: ctx.pilotId,
+    userId: ctx.adminUserId,
+    signedAt: new Date().toISOString(),
+    briefVersion: 1,
+    briefHash: computeBriefHash(frozenBrief(ctx)),
+    wordingVersion: 1,
+    wordingHash: "wording-hash",
+    ip: "203.0.113.1",
+    userAgent: "vitest",
+    source: "pilot-self",
+  };
+  await writeSignature(signature);
 }
 
 function lock(ctx: Ctx) {
@@ -311,9 +337,13 @@ describe("lockRound async brief PDF queue", () => {
     const ctx = await seedBriefCompleteRound();
     const briefPath = `round-briefs/${ctx.roundId}.json`;
     const roundPath = `rounds/${ctx.roundId}.json`;
-    const signaturePath = `signatures/${ctx.roundId}/preserved.json`;
+    const signaturePath = `signatures/${ctx.roundId}/${ctx.teamId}-1-v1.json`;
     await writePrivateJson(briefPath, frozenBrief(ctx));
-    await writePrivateJson(signaturePath, { signed: true, briefVersion: 1 });
+    // Schema-valid signature at the canonical ledger path — lock's completeness
+    // gate schema-reads every blob under signatures/{roundId}/, so a raw marker
+    // here would throw BlobShapeError. writeSignature is create-only, so this is
+    // a no-op when seedBriefCompleteRound already seeded the same path.
+    await seedCurrentSignature(ctx);
     await lock(ctx);
     const locked = await readRequiredRound(ctx.roundId);
     await setPureTrackStatus(ctx.roundId, "ready", {
@@ -492,5 +522,198 @@ describe("lockRound async brief PDF queue", () => {
     const index = await readPublicJson<Array<{ id: string; status: string }>>("rounds.json");
     const entry = index?.find((r) => r.id === ctx.roundId);
     expect(entry?.status).toBe("Locked");
+  });
+
+  it("returns 409 SIGNATURES_INCOMPLETE naming unsigned slots when a Filled slot is unsigned", async () => {
+    const ctx = await seedBriefCompleteRound({ seedSignature: false });
+    await writePrivateJson(`round-briefs/${ctx.roundId}.json`, frozenBrief(ctx));
+
+    const res = await lock(ctx);
+
+    expect(res.status).toBe(409);
+    const body = res.jsonBody as { code: string; detail?: string };
+    expect(body.code).toBe("SIGNATURES_INCOMPLETE");
+    expect(body.detail).toContain(`Alpha #1 (${ctx.pilotId})`);
+    const round = await readRequiredRound(ctx.roundId);
+    expect(round.status).toBe("BriefComplete");
+    expect(enqueueBriefPdf).not.toHaveBeenCalled();
+    expect(enqueuePureTrackGroupJob).not.toHaveBeenCalled();
+  });
+
+  it("locks when every Filled slot has a current signature", async () => {
+    const ctx = await seedBriefCompleteRound();
+    await writePrivateJson(`round-briefs/${ctx.roundId}.json`, frozenBrief(ctx));
+
+    const res = await lock(ctx);
+
+    expect(res.status).toBe(200);
+    expect((res.jsonBody as Round).status).toBe("Locked");
+  });
+
+  it("preserves signToFly across lock", async () => {
+    const ctx = await seedBriefCompleteRound();
+    const round = await readRequiredRound(ctx.roundId);
+    round.teams[0].pilots[0].signToFly = true;
+    await writePrivateJson(`rounds/${ctx.roundId}.json`, round);
+    await writePrivateJson(`round-briefs/${ctx.roundId}.json`, frozenBrief(ctx));
+
+    const res = await lock(ctx);
+
+    expect(res.status).toBe(200);
+    const locked = await readRequiredRound(ctx.roundId);
+    expect(locked.teams[0]?.pilots[0]?.signToFly).toBe(true);
+    expect(locked.teams[0]?.pilots[0]?.accountedFor).toBe(false);
+  });
+
+  it("treats a stale-version signature as unsigned", async () => {
+    const ctx = await seedBriefCompleteRound({ seedSignature: false });
+    await seedCurrentSignature(ctx);
+    await writePrivateJson(
+      `round-briefs/${ctx.roundId}.json`,
+      frozenBrief(ctx, {
+        version: 2,
+        versionHistory: [
+          {
+            version: 1,
+            hash: "stale-v1-hash",
+            createdAt: "2026-06-01T08:00:00.000Z",
+            createdBy: "seed",
+          },
+        ],
+      }),
+    );
+
+    const res = await lock(ctx);
+
+    expect(res.status).toBe(409);
+    const body = res.jsonBody as { code: string; detail?: string };
+    expect(body.code).toBe("SIGNATURES_INCOMPLETE");
+    expect(body.detail).toContain("Alpha #1");
+  });
+
+  it("treats a signature by a different pilot in the same slot as unsigned", async () => {
+    // Team rosters are not material brief fields, so swapping a pilot into an
+    // occupied place leaves the brief version untouched. The previous occupant's
+    // signature must not authorize the new pilot to fly.
+    const ctx = await seedBriefCompleteRound({ seedSignature: false });
+    await writePrivateJson(`round-briefs/${ctx.roundId}.json`, frozenBrief(ctx));
+    const formerOccupant = randomUUID();
+    await writeSignature({
+      id: randomUUID(),
+      roundId: ctx.roundId,
+      teamId: ctx.teamId,
+      place: 1,
+      pilotId: formerOccupant,
+      userId: ctx.adminUserId,
+      signedAt: new Date().toISOString(),
+      briefVersion: 1,
+      briefHash: computeBriefHash(frozenBrief(ctx)),
+      wordingVersion: 1,
+      wordingHash: "wording-hash",
+      ip: "203.0.113.1",
+      userAgent: "vitest",
+      source: "pilot-self",
+    });
+
+    const res = await lock(ctx);
+
+    expect(res.status).toBe(409);
+    const body = res.jsonBody as { code: string; detail?: string };
+    expect(body.code).toBe("SIGNATURES_INCOMPLETE");
+    expect(body.detail).toContain(`Alpha #1 (${ctx.pilotId})`);
+    const round = await readRequiredRound(ctx.roundId);
+    expect(round.status).toBe("BriefComplete");
+  });
+
+  it("materializes signToFly from the ledger when the reflect job has not run", async () => {
+    // signToFly is reflected asynchronously, so it can still be false at lock
+    // even though the slot is signed. reflectRoundSignToFly early-returns once
+    // the round leaves BriefComplete, so the lock must write the flag itself or
+    // the stale false becomes permanent.
+    const ctx = await seedBriefCompleteRound();
+    await writePrivateJson(`round-briefs/${ctx.roundId}.json`, frozenBrief(ctx));
+    const before = await readRequiredRound(ctx.roundId);
+    expect(before.teams[0].pilots[0].signToFly).toBe(false);
+
+    const res = await lock(ctx);
+
+    expect(res.status).toBe(200);
+    const round = await readRequiredRound(ctx.roundId);
+    expect(round.status).toBe("Locked");
+    expect(round.teams[0].pilots[0].signToFly).toBe(true);
+    expect(round.teams[0].pilots[0].accountedFor).toBe(false);
+  });
+
+  it("uses the newest same-version override when a slot has several", async () => {
+    // Override signatures land on random-suffixed paths, so one slot can hold
+    // several at the same brief version — the former occupant's and the current
+    // one's, after a roster swap. Blob listing order is lexicographic on that
+    // suffix, so the winner must be decided by signedAt, not listing order.
+    const ctx = await seedBriefCompleteRound({ seedSignature: false });
+    await writePrivateJson(`round-briefs/${ctx.roundId}.json`, frozenBrief(ctx));
+    const briefHash = computeBriefHash(frozenBrief(ctx));
+    const base = {
+      roundId: ctx.roundId,
+      teamId: ctx.teamId,
+      place: 1,
+      userId: ctx.adminUserId,
+      briefVersion: 1,
+      briefHash,
+      wordingVersion: 1,
+      wordingHash: "wording-hash",
+      ip: "203.0.113.1",
+      userAgent: "vitest",
+      source: "coord-override" as const,
+    };
+    // Former occupant sorts FIRST by blob name but signed EARLIER, so listing
+    // order actively favours the wrong pilot unless signedAt decides.
+    await writeSignatureToPath(
+      { ...base, id: randomUUID(), pilotId: randomUUID(), signedAt: "2026-06-01T10:00:00.000Z" },
+      overrideSignaturePath(ctx.roundId, ctx.teamId, 1, 1, "aaaa"),
+    );
+    await writeSignatureToPath(
+      { ...base, id: randomUUID(), pilotId: ctx.pilotId, signedAt: "2026-06-01T11:00:00.000Z" },
+      overrideSignaturePath(ctx.roundId, ctx.teamId, 1, 1, "zzzz"),
+    );
+
+    const res = await lock(ctx);
+
+    expect(res.status).toBe(200);
+    const round = await readRequiredRound(ctx.roundId);
+    expect(round.status).toBe("Locked");
+    expect(round.teams[0].pilots[0].signToFly).toBe(true);
+  });
+
+  it("locks a round with zero Filled slots", async () => {
+    const ctx = await seedBriefCompleteRound();
+    const round = await readRequiredRound(ctx.roundId);
+    round.teams = [
+      {
+        id: ctx.teamId,
+        teamName: "Alpha",
+        club: { id: ctx.clubId, name: "Test Club" },
+        score: 0,
+        pilots: [
+          {
+            placeInTeam: 1,
+            isScoring: false,
+            status: "Empty",
+            accountedFor: false,
+            signToFly: false,
+            noScore: false,
+            pilotPoints: 0,
+            pilotId: null,
+            snapshot: null,
+            flight: null,
+          },
+        ],
+      },
+    ];
+    await writePrivateJson(`rounds/${ctx.roundId}.json`, round);
+    await writePrivateJson(`round-briefs/${ctx.roundId}.json`, frozenBrief(ctx));
+
+    const res = await lock(ctx);
+
+    expect(res.status).toBe(200);
   });
 });

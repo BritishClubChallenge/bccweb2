@@ -1,13 +1,16 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
 import { randomUUID } from "node:crypto";
-import type { Round, Team } from "@bccweb/types";
+import type { Round, RoundBrief, Team } from "@bccweb/types";
 import { expect } from "vitest";
 import {
   makeClub,
   makePilot,
   makeRound,
+  writePrivateJson,
 } from "../../__tests__/helpers/seed.js";
+import { computeBriefHash } from "../../lib/signTofly/briefVersion.js";
+import { writeSignature } from "../../lib/signTofly/ledger.js";
 import {
   invokeEvidenceHandler,
   makeEvidenceRequest,
@@ -20,13 +23,21 @@ export async function roundForOtherClub(
   return makeRound({ organisingClubId: randomUUID(), status });
 }
 
+// Builds a Locked round whose only Filled slot is pre-signed at the frozen
+// brief version. The lock gate (lockRound → listSignaturesForRound) schema-
+// reads every blob under signatures/{roundId}/, so the signature must be
+// schema-valid and `writeSignature`-create-only at the canonical path.
 export async function roundWithFlight(
   flightId: string,
   ownerPilotId: string
 ): Promise<Round> {
   const clubId = randomUUID();
+  const teamId = randomUUID();
+  const roundId = randomUUID();
+  const siteId = randomUUID();
+  const date = "2026-06-09";
   const team: Team = {
-    id: randomUUID(),
+    id: teamId,
     teamName: "Flight Team",
     club: { id: clubId, name: "Flight Club" },
     score: 0,
@@ -53,11 +64,53 @@ export async function roundWithFlight(
       },
     ],
   };
-  return makeRound({
-    organisingClubId: clubId,
+  const brief: RoundBrief & { version: number } = {
+    roundId,
+    version: 1,
+    generatedAt: "2026-06-01T08:00:00.000Z",
+    date,
+    siteName: "Flight Site",
+    teams: [],
+    windSpeedDirection: "W 10kt",
+  };
+  brief.hash = computeBriefHash(brief);
+  const round: Round = {
+    id: roundId,
+    date,
     status: "Locked",
+    isLocked: true,
+    maxTeams: 8,
+    minimumScore: 0,
+    site: { id: siteId, name: brief.siteName },
+    organisingClub: { id: clubId, name: "Flight Club" },
+    season: { year: 2026 },
     teams: [team],
+    brief: {
+      version: 1,
+      jsonPath: `round-briefs/${roundId}.json`,
+      pdfPath: `round-briefs/${roundId}.pdf`,
+      generatedAt: brief.generatedAt,
+    },
+  };
+  await writePrivateJson(`rounds/${roundId}.json`, round);
+  await writePrivateJson(`round-briefs/${roundId}.json`, brief);
+  await writeSignature({
+    id: randomUUID(),
+    roundId,
+    teamId,
+    place: 1,
+    pilotId: ownerPilotId,
+    userId: randomUUID(),
+    signedAt: new Date().toISOString(),
+    briefVersion: 1,
+    briefHash: brief.hash,
+    wordingVersion: 1,
+    wordingHash: "issue8-wording-hash",
+    ip: "203.0.113.1",
+    userAgent: "issue8-fixture",
+    source: "pilot-self",
   });
+  return round;
 }
 
 export async function seedPilotSeasonClubAssignment(

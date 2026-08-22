@@ -196,6 +196,17 @@ full-round recompute can be expensive. Operator recovery:
 `POST /api/rounds/{id}/reflect-sign-to-fly` (Admin/scoped-coord) re-runs the reflect
 synchronously and returns the corrected round.
 
+Reflect only applies while the round is `BriefComplete` — it early-returns otherwise, so a
+job that lands after a lock is a no-op. Locking therefore does the work itself: inside the
+round+brief lease `lockRound` lists the ledger, refuses the transition with
+`409 SIGNATURES_INCOMPLETE` if any Filled slot lacks a current-brief-version signature by
+its current pilot, and otherwise materializes `slot.signToFly` from that same snapshot
+before persisting. Without it a round could lock with the flags still showing the
+pre-reflect `false`, permanently. Locking preserves `signToFly` and still resets
+`accountedFor`. The signing endpoints take no lease, so a signature can land between the
+listing and the commit; the ledger is append-only, so that race yields at worst a spurious
+409 that succeeds on retry.
+
 ### Rescore flow
 
 Only the Admin rescore path (`POST /api/rounds/{id}/rescore`) enqueues

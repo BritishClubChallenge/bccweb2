@@ -29,6 +29,7 @@ import {
   writePublicJson,
 } from "../../__tests__/helpers/seed.js";
 import { signaturePath } from "../../lib/signTofly/ledger.js";
+import { writeSignature } from "../../lib/signTofly/ledger.js";
 import { computeBriefHash } from "../../lib/signTofly/briefVersion.js";
 import * as pureTrack from "../../lib/puretrack.js";
 
@@ -494,7 +495,7 @@ describe("round lifecycle integration", () => {
   });
 
   it("double-lock race allows exactly one lock to succeed", async () => {
-    const ctx = await seedLifecycleRound({ status: "BriefComplete" });
+    const ctx = await seedLifecycleRound({ status: "BriefComplete", preSign: true });
     await seedBrief(ctx);
 
     const settled = await Promise.allSettled([lockRound(ctx), lockRound(ctx)]);
@@ -611,7 +612,7 @@ describe("round lifecycle integration", () => {
 
   it("PureTrack enqueue failure during lock writes no group blob and lock still succeeds", async () => {
     vi.mocked(enqueuePureTrackGroupJob).mockRejectedValueOnce(new Error("queue unavailable"));
-    const ctx = await seedLifecycleRound({ status: "BriefComplete", pilotPureTrackId: 12345 });
+    const ctx = await seedLifecycleRound({ status: "BriefComplete", pilotPureTrackId: 12345, preSign: true });
     await seedBrief(ctx);
 
     const res = await lockRound(ctx);
@@ -690,6 +691,7 @@ async function seedLifecycleRound(opts: {
   pilotPureTrackId?: number;
   flightDistance?: number;
   complete?: boolean;
+  preSign?: boolean;
 } = {}): Promise<LifecycleContext> {
   const base = await seedBaseEntities({ pilotPureTrackId: opts.pilotPureTrackId });
   const teamId = randomUUID();
@@ -747,6 +749,32 @@ async function seedLifecycleRound(opts: {
     status: round.status,
     seasonYear: base.year,
   }]);
+  // Opt-in pre-sign for tests that invoke lockRound directly without first
+  // calling signOwnSlot (double-lock race, PureTrack-enqueue-failure). The
+  // default path is unchanged so signOwnSlot's 201/200 contract still holds.
+  if (opts.preSign === true) {
+    for (const team of round.teams) {
+      for (const slot of team.pilots) {
+        if (slot.status !== "Filled" || !slot.pilotId) continue;
+        await writeSignature({
+          id: randomUUID(),
+          roundId,
+          teamId: team.id,
+          place: slot.placeInTeam,
+          pilotId: slot.pilotId,
+          userId: base.adminUserId,
+          signedAt: new Date().toISOString(),
+          briefVersion: 1,
+          briefHash: "lifecycle-fixture-seed-hash",
+          wordingVersion: 1,
+          wordingHash: "lifecycle-fixture-wording-hash",
+          ip: "203.0.113.5",
+          userAgent: "lifecycle-fixture",
+          source: "pilot-self",
+        });
+      }
+    }
+  }
   return { ...base, roundId, teamId };
 }
 

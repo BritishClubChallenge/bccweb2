@@ -38,6 +38,7 @@ import {
   writePublicJson,
 } from "../../__tests__/helpers/seed.js";
 import { computeBriefHash, MATERIAL_BRIEF_FIELDS } from "../../lib/signTofly/briefVersion.js";
+import { writeSignature } from "../../lib/signTofly/ledger.js";
 import * as pureTrack from "../../lib/puretrack.js";
 
 // ─── External-service mocks (deterministic + no real I/O) ─────────────────────
@@ -237,6 +238,44 @@ async function seedBriefCompleteRound(): Promise<Ctx> {
       seasonYear: year,
     },
   ]);
+
+  // Sign the seeded Filled slot at the current brief version so lockRound's
+  // completeness gate sees a schema-valid signature at the canonical path. The
+  // gate reads every blob under signatures/{roundId}/, so writeSignature is
+  // required; the brief hash here must match the value the test later writes
+  // via frozen(buildBrief()).
+  const seededBrief = {
+    roundId,
+    version: 1,
+    generatedAt: "2026-06-09T08:00:00.000Z",
+    date: `${year}-06-09`,
+    siteName: "Milk Hill",
+    parkingW3W: "filled.count.soap",
+    briefingW3W: "brief.count.soap",
+    takeOffW3W: "takeoff.count.soap",
+    briefingTime: "10:00",
+    checkInByTime: "19:00",
+    landByTime: "18:00",
+    windSpeedDirection: "NW 15kt",
+    teams: [],
+  };
+  const seededBriefHash = computeBriefHash(seededBrief);
+  await writeSignature({
+    id: randomUUID(),
+    roundId,
+    teamId,
+    place: 1,
+    pilotId: pilot.id,
+    userId: admin.id,
+    signedAt: new Date().toISOString(),
+    briefVersion: 1,
+    briefHash: seededBriefHash,
+    wordingVersion: 1,
+    wordingHash: "lock-preserves-material-wording-hash",
+    ip: "203.0.113.4",
+    userAgent: "lock-preserves-material-fixture",
+    source: "pilot-self",
+  });
 
   return {
     roundId,

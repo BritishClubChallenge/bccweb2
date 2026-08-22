@@ -103,4 +103,16 @@ don't re-read the source.
   (non-material edits don't change the hash).
 - `invalidate.ts` — `invalidatePriorSignToFlyFlags(...)` clears `slot.signToFly` when latest
   signature predates current brief version.
+- `slotSignatureVersions.ts` — single owner of the brief-version rule: `slotKey`,
+  `latestSignedVersions` (newest per `teamId:place`; equal versions break by `signedAt`),
+  `currentBriefVersion`, `isSignedAtVersion` (pilot must match the slot's occupant),
+  `isSupersededAtVersion`. `reflect.ts`, `completeness.ts` and `invalidate.ts` all route
+  through it so the flags and the lock gate cannot drift apart.
+- `reflect.ts` — `materializeSignToFly(round,brief,signatures)` writes `slot.signToFly` from
+  the ledger; `reflectRoundSignToFly(roundId)` leases the round and applies it, and
+  **early-returns unless the round is `BriefComplete`**.
+- `completeness.ts` — `findUnsignedSlots(round,brief,signatures)` backs the lock gate:
+  Filled slots with no current-version signature by their current pilot. `lockRound` throws
+  `409 SIGNATURES_INCOMPLETE` on any hit and otherwise materializes the flags itself before
+  the round leaves `BriefComplete`.
 - `auditLog.ts` — `appendAuditLine(category,payload)` append-only NDJSON (`audit/<cat>-YYYY-MM-DD.jsonl`).
