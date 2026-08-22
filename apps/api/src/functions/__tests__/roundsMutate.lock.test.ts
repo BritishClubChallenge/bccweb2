@@ -591,6 +591,59 @@ describe("lockRound async brief PDF queue", () => {
     expect(body.detail).toContain("Alpha #1");
   });
 
+  it("treats a signature by a different pilot in the same slot as unsigned", async () => {
+    // Team rosters are not material brief fields, so swapping a pilot into an
+    // occupied place leaves the brief version untouched. The previous occupant's
+    // signature must not authorize the new pilot to fly.
+    const ctx = await seedBriefCompleteRound({ seedSignature: false });
+    await writePrivateJson(`round-briefs/${ctx.roundId}.json`, frozenBrief(ctx));
+    const formerOccupant = randomUUID();
+    await writeSignature({
+      id: randomUUID(),
+      roundId: ctx.roundId,
+      teamId: ctx.teamId,
+      place: 1,
+      pilotId: formerOccupant,
+      userId: ctx.adminUserId,
+      signedAt: new Date().toISOString(),
+      briefVersion: 1,
+      briefHash: computeBriefHash(frozenBrief(ctx)),
+      wordingVersion: 1,
+      wordingHash: "wording-hash",
+      ip: "203.0.113.1",
+      userAgent: "vitest",
+      source: "pilot-self",
+    });
+
+    const res = await lock(ctx);
+
+    expect(res.status).toBe(409);
+    const body = res.jsonBody as { code: string; detail?: string };
+    expect(body.code).toBe("SIGNATURES_INCOMPLETE");
+    expect(body.detail).toContain(`Alpha #1 (${ctx.pilotId})`);
+    const round = await readRequiredRound(ctx.roundId);
+    expect(round.status).toBe("BriefComplete");
+  });
+
+  it("materializes signToFly from the ledger when the reflect job has not run", async () => {
+    // signToFly is reflected asynchronously, so it can still be false at lock
+    // even though the slot is signed. reflectRoundSignToFly early-returns once
+    // the round leaves BriefComplete, so the lock must write the flag itself or
+    // the stale false becomes permanent.
+    const ctx = await seedBriefCompleteRound();
+    await writePrivateJson(`round-briefs/${ctx.roundId}.json`, frozenBrief(ctx));
+    const before = await readRequiredRound(ctx.roundId);
+    expect(before.teams[0].pilots[0].signToFly).toBe(false);
+
+    const res = await lock(ctx);
+
+    expect(res.status).toBe(200);
+    const round = await readRequiredRound(ctx.roundId);
+    expect(round.status).toBe("Locked");
+    expect(round.teams[0].pilots[0].signToFly).toBe(true);
+    expect(round.teams[0].pilots[0].accountedFor).toBe(false);
+  });
+
   it("locks a round with zero Filled slots", async () => {
     const ctx = await seedBriefCompleteRound();
     const round = await readRequiredRound(ctx.roundId);

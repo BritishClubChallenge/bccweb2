@@ -6,8 +6,9 @@ import { currentBriefVersion, isSignedAtVersion, latestSignedVersions } from "./
 
 /**
  * Slots blocking a lock: those that are Filled (have a pilot) but hold no
- * signature at the round's current brief version. A missing signature and a
- * signature against an older brief both count as unsigned.
+ * signature at the round's current brief version. A missing signature, one
+ * against an older brief, and one signed by a pilot who no longer occupies the
+ * slot all count as unsigned.
  *
  * The version rule itself lives in `slotSignatureVersions.js`, shared with the
  * reflect job, so the gate and `slot.signToFly` can never disagree.
@@ -24,7 +25,7 @@ export function findUnsignedSlots(
   for (const team of round.teams) {
     for (const slot of team.pilots) {
       if (!slot.pilotId || slot.status !== "Filled") continue;
-      if (!isSignedAtVersion(latest, team.id, slot.placeInTeam, version)) {
+      if (!isSignedAtVersion(latest, team.id, slot.placeInTeam, version, slot.pilotId)) {
         unsigned.push({
           teamId: team.id,
           teamName: team.teamName,

@@ -42,7 +42,7 @@ export function materializeSignToFly(
   let changed = false;
   for (const team of round.teams) {
     for (const slot of team.pilots) {
-      const next = isSignedAtVersion(latest, team.id, slot.placeInTeam, version);
+      const next = isSignedAtVersion(latest, team.id, slot.placeInTeam, version, slot.pilotId);
       if (slot.signToFly !== next) {
         slot.signToFly = next;
         changed = true;

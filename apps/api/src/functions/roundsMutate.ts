@@ -74,6 +74,7 @@ import {
 import { getTelemetryClient } from "../lib/telemetry.js";
 import { listSignaturesForRound } from "../lib/signTofly/ledger.js";
 import { findUnsignedSlots } from "../lib/signTofly/completeness.js";
+import { materializeSignToFly } from "../lib/signTofly/reflect.js";
 import { slotKey } from "../lib/signTofly/slotSignatureVersions.js";
 import { invalidatePriorSignToFlyFlags } from "../lib/signTofly/invalidate.js";
 import { computeBriefHash, MATERIAL_BRIEF_FIELDS } from "../lib/signTofly/briefVersion.js";
@@ -1136,6 +1137,15 @@ async function lockRound(
               .join("; "),
         );
       }
+
+      // Write the ledger result onto the slots before the round leaves
+      // BriefComplete. `slot.signToFly` is materialized asynchronously off the
+      // signtofly-reflect queue, so it can still be false here even though every
+      // Filled slot is signed — and `reflectRoundSignToFly` early-returns for
+      // non-BriefComplete rounds, so a reflect job that lands after this write
+      // would be a no-op and the stale false would become permanent. The gate
+      // above has already proven the ledger under this same lease, so reuse it.
+      materializeSignToFly(r, existing, signatures);
 
       // Hard failure: if the frozen brief JSON cannot be written, the round must
       // NOT advance to Locked. This write throws on failure, so the round write

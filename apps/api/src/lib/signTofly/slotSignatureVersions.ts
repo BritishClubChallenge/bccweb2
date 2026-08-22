@@ -26,17 +26,24 @@ export function slotKey(teamId: string, place: number): string {
   return `${teamId}:${place}`;
 }
 
+/** The newest signature recorded for one slot. */
+export type LatestSignature = { version: number; pilotId: string };
+
 /**
- * Highest brief version signed for each slot, keyed by team and place.
- * Signatures predating brief versioning carry a null `briefVersion` and are
- * ignored — they can never satisfy a current-version check.
+ * Newest signature for each slot, keyed by team and place. Signatures predating
+ * brief versioning carry a null `briefVersion` and are ignored — they can never
+ * satisfy a current-version check. The signing pilot is carried alongside the
+ * version because a slot's occupant can change without the brief version moving.
  */
-export function latestSignedVersions(signatures: Signature[]): Map<string, number> {
-  const latest = new Map<string, number>();
+export function latestSignedVersions(signatures: Signature[]): Map<string, LatestSignature> {
+  const latest = new Map<string, LatestSignature>();
   for (const signature of signatures) {
     if (signature.briefVersion === null) continue;
     const key = slotKey(signature.teamId, signature.place);
-    latest.set(key, Math.max(latest.get(key) ?? 0, signature.briefVersion));
+    const current = latest.get(key);
+    if (current === undefined || signature.briefVersion > current.version) {
+      latest.set(key, { version: signature.briefVersion, pilotId: signature.pilotId });
+    }
   }
   return latest;
 }
@@ -47,16 +54,23 @@ export function currentBriefVersion(brief: RoundBrief & { version?: number }): n
 }
 
 /**
- * Whether the slot holds a signature at exactly `version`. A slot with no
- * signature at all, or whose latest signature is older, is not signed.
+ * Whether `pilotId` holds a signature on this slot at exactly `version`.
+ *
+ * The pilot must match. Team rosters are NOT material brief fields, so swapping
+ * a pilot into an occupied place leaves the brief version untouched; without the
+ * pilot check the previous occupant's signature would authorize the new pilot to
+ * fly. An empty slot (`pilotId === null`) is never signed.
  */
 export function isSignedAtVersion(
-  latest: Map<string, number>,
+  latest: Map<string, LatestSignature>,
   teamId: string,
   place: number,
   version: number,
+  pilotId: string | null,
 ): boolean {
-  return latest.get(slotKey(teamId, place)) === version;
+  if (pilotId === null) return false;
+  const entry = latest.get(slotKey(teamId, place));
+  return entry !== undefined && entry.version === version && entry.pilotId === pilotId;
 }
 
 /**
@@ -65,11 +79,11 @@ export function isSignedAtVersion(
  * callers that only demote stale signatures leave it untouched.
  */
 export function isSupersededAtVersion(
-  latest: Map<string, number>,
+  latest: Map<string, LatestSignature>,
   teamId: string,
   place: number,
   version: number,
 ): boolean {
-  const latestVersion = latest.get(slotKey(teamId, place));
-  return latestVersion !== undefined && latestVersion < version;
+  const entry = latest.get(slotKey(teamId, place));
+  return entry !== undefined && entry.version < version;
 }
