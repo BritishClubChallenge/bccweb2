@@ -1122,9 +1122,17 @@ async function lockRound(
       }
 
       // Every Filled slot must hold a signature at the current brief version
-      // before the round may lock. The list runs inside the round+brief lease so
-      // a concurrent sign cannot interleave between this check and the commit;
-      // it uses the leased round `r` and the frozen brief `existing`.
+      // before the round may lock, checked against the leased round `r` and the
+      // frozen brief `existing` rather than the candidate.
+      //
+      // The signing handlers take NO lease — signatures.ts appends to the ledger
+      // directly — so a signature can land between this listing and the commit.
+      // That is safe because the ledger is append-only: a listing can only miss
+      // a new signature, never lose one it saw, so the race yields at worst a
+      // spurious 409 that succeeds on retry, and never a lock admitted on
+      // signatures this check did not see. The round+brief lease held here does
+      // exclude concurrent reopen (`transition` takes the round lease) and brief
+      // edits, which is what the hash check above depends on.
       const signatures = await listSignaturesForRound(id);
       const unsigned = findUnsignedSlots(r, existing, signatures);
       if (unsigned.length > 0) {
