@@ -27,13 +27,20 @@ export function slotKey(teamId: string, place: number): string {
 }
 
 /** The newest signature recorded for one slot. */
-export type LatestSignature = { version: number; pilotId: string };
+export type LatestSignature = { version: number; pilotId: string; signedAt: string | null };
 
 /**
  * Newest signature for each slot, keyed by team and place. Signatures predating
  * brief versioning carry a null `briefVersion` and are ignored — they can never
  * satisfy a current-version check. The signing pilot is carried alongside the
  * version because a slot's occupant can change without the brief version moving.
+ *
+ * Equal versions are broken by `signedAt`, newest wins. Override signatures are
+ * written to random-suffixed paths (`overrideSignaturePath`), so one slot can
+ * hold several signatures at the same version — for different pilots, after a
+ * roster swap — and blob listing order is lexicographic on that random suffix,
+ * not chronological. Without the tie-break the winner would be arbitrary and the
+ * gate could reject the pilot who actually signed.
  */
 export function latestSignedVersions(signatures: Signature[]): Map<string, LatestSignature> {
   const latest = new Map<string, LatestSignature>();
@@ -41,11 +48,22 @@ export function latestSignedVersions(signatures: Signature[]): Map<string, Lates
     if (signature.briefVersion === null) continue;
     const key = slotKey(signature.teamId, signature.place);
     const current = latest.get(key);
-    if (current === undefined || signature.briefVersion > current.version) {
-      latest.set(key, { version: signature.briefVersion, pilotId: signature.pilotId });
+    if (current === undefined || isNewer(signature, current)) {
+      latest.set(key, {
+        version: signature.briefVersion,
+        pilotId: signature.pilotId,
+        signedAt: signature.signedAt,
+      });
     }
   }
   return latest;
+}
+
+function isNewer(candidate: Signature, current: LatestSignature): boolean {
+  const version = candidate.briefVersion ?? 0;
+  if (version !== current.version) return version > current.version;
+  // A null signedAt carries no recency, so it loses to any timestamped signature.
+  return (candidate.signedAt ?? "") > (current.signedAt ?? "");
 }
 
 /** The version a signature must carry to count as current. Briefs written before versioning are version 1. */

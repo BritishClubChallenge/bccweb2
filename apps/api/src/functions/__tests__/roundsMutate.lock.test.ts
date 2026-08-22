@@ -14,7 +14,7 @@ import {
   writePublicJson,
 } from "../../__tests__/helpers/seed.js";
 import { computeBriefHash } from "../../lib/signTofly/briefVersion.js";
-import { writeSignature } from "../../lib/signTofly/ledger.js";
+import { overrideSignaturePath, writeSignature, writeSignatureToPath } from "../../lib/signTofly/ledger.js";
 import * as pureTrack from "../../lib/puretrack.js";
 
 const blobWriteControl = vi.hoisted(() => ({
@@ -642,6 +642,46 @@ describe("lockRound async brief PDF queue", () => {
     expect(round.status).toBe("Locked");
     expect(round.teams[0].pilots[0].signToFly).toBe(true);
     expect(round.teams[0].pilots[0].accountedFor).toBe(false);
+  });
+
+  it("uses the newest same-version override when a slot has several", async () => {
+    // Override signatures land on random-suffixed paths, so one slot can hold
+    // several at the same brief version — the former occupant's and the current
+    // one's, after a roster swap. Blob listing order is lexicographic on that
+    // suffix, so the winner must be decided by signedAt, not listing order.
+    const ctx = await seedBriefCompleteRound({ seedSignature: false });
+    await writePrivateJson(`round-briefs/${ctx.roundId}.json`, frozenBrief(ctx));
+    const briefHash = computeBriefHash(frozenBrief(ctx));
+    const base = {
+      roundId: ctx.roundId,
+      teamId: ctx.teamId,
+      place: 1,
+      userId: ctx.adminUserId,
+      briefVersion: 1,
+      briefHash,
+      wordingVersion: 1,
+      wordingHash: "wording-hash",
+      ip: "203.0.113.1",
+      userAgent: "vitest",
+      source: "coord-override" as const,
+    };
+    // Former occupant sorts FIRST by blob name but signed EARLIER, so listing
+    // order actively favours the wrong pilot unless signedAt decides.
+    await writeSignatureToPath(
+      { ...base, id: randomUUID(), pilotId: randomUUID(), signedAt: "2026-06-01T10:00:00.000Z" },
+      overrideSignaturePath(ctx.roundId, ctx.teamId, 1, 1, "aaaa"),
+    );
+    await writeSignatureToPath(
+      { ...base, id: randomUUID(), pilotId: ctx.pilotId, signedAt: "2026-06-01T11:00:00.000Z" },
+      overrideSignaturePath(ctx.roundId, ctx.teamId, 1, 1, "zzzz"),
+    );
+
+    const res = await lock(ctx);
+
+    expect(res.status).toBe(200);
+    const round = await readRequiredRound(ctx.roundId);
+    expect(round.status).toBe("Locked");
+    expect(round.teams[0].pilots[0].signToFly).toBe(true);
   });
 
   it("locks a round with zero Filled slots", async () => {
