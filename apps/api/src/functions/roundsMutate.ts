@@ -1133,7 +1133,22 @@ async function lockRound(
       // signatures this check did not see. The round+brief lease held here does
       // exclude concurrent reopen (`transition` takes the round lease) and brief
       // edits, which is what the hash check above depends on.
-      const signatures = await listSignaturesForRound(id);
+      let signatures: Signature[];
+      try {
+        signatures = await listSignaturesForRound(id);
+      } catch {
+        // The outer catch turns anything that is not an HttpError into
+        // BRIEF_PERSIST_FAILED and tells the operator to reopen and re-complete.
+        // Nothing has been persisted yet here, and that advice does not repair an
+        // unreadable or malformed ledger, so report the real cause. The
+        // underlying error is deliberately not echoed — it can carry storage
+        // paths.
+        throw new HttpError(
+          500,
+          "SIGNATURE_LEDGER_UNAVAILABLE",
+          "Could not read the sign-to-fly ledger while locking — the round remains BriefComplete; retry once the ledger is readable",
+        );
+      }
       const unsigned = findUnsignedSlots(r, existing, signatures);
       if (unsigned.length > 0) {
         throw new HttpError(
