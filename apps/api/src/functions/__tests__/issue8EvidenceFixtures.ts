@@ -103,7 +103,7 @@ export async function roundWithFlight(
     userId: randomUUID(),
     signedAt: new Date().toISOString(),
     briefVersion: 1,
-    briefHash: brief.hash!,
+    briefHash: brief.hash,
     wordingVersion: 1,
     wordingHash: "issue8-wording-hash",
     ip: "203.0.113.1",

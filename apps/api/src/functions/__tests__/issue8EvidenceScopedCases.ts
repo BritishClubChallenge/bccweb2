@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
 import { randomUUID } from "node:crypto";
-import type { Team } from "@bccweb/types";
+import type { Round, RoundBrief, Team } from "@bccweb/types";
 import { makeClubTeam, makeRound, makeSite, writePrivateJson } from "../../__tests__/helpers/seed.js";
 import { computeBriefHash } from "../../lib/signTofly/briefVersion.js";
 import { writeSignature } from "../../lib/signTofly/ledger.js";
@@ -46,7 +46,7 @@ async function seedLockedRoundWithSignedFilledSlot(
       },
     ],
   };
-  const brief = {
+  const brief: RoundBrief & { version: number } = {
     roundId,
     version: 1,
     generatedAt: "2026-06-01T08:00:00.000Z",
@@ -54,16 +54,16 @@ async function seedLockedRoundWithSignedFilledSlot(
     siteName: `${clubName} Site`,
     teams: [],
     windSpeedDirection: "W 10kt",
-  } as const;
-  const briefWithHash = { ...brief, hash: computeBriefHash(brief) };
-  const round = {
+  };
+  brief.hash = computeBriefHash(brief);
+  const round: Round = {
     id: roundId,
     date,
     status: "Locked" as const,
     isLocked: true,
     maxTeams: 8,
     minimumScore: 0,
-    site: { id: siteId, name: briefWithHash.siteName },
+    site: { id: siteId, name: brief.siteName },
     organisingClub: { id: clubId, name: clubName },
     season: { year: 2026 },
     teams: [team],
@@ -71,11 +71,11 @@ async function seedLockedRoundWithSignedFilledSlot(
       version: 1,
       jsonPath: `round-briefs/${roundId}.json`,
       pdfPath: `round-briefs/${roundId}.pdf`,
-      generatedAt: briefWithHash.generatedAt,
+      generatedAt: brief.generatedAt,
     },
   };
   await writePrivateJson(`rounds/${roundId}.json`, round);
-  await writePrivateJson(`round-briefs/${roundId}.json`, briefWithHash);
+  await writePrivateJson(`round-briefs/${roundId}.json`, brief);
   await writeSignature({
     id: randomUUID(),
     roundId,
@@ -85,7 +85,7 @@ async function seedLockedRoundWithSignedFilledSlot(
     userId: randomUUID(),
     signedAt: new Date().toISOString(),
     briefVersion: 1,
-    briefHash: briefWithHash.hash!,
+    briefHash: brief.hash,
     wordingVersion: 1,
     wordingHash: "issue8-scoped-wording-hash",
     ip: "203.0.113.2",
