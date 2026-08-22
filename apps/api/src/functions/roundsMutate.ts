@@ -74,6 +74,7 @@ import {
 import { getTelemetryClient } from "../lib/telemetry.js";
 import { listSignaturesForRound } from "../lib/signTofly/ledger.js";
 import { findUnsignedSlots } from "../lib/signTofly/completeness.js";
+import { slotKey } from "../lib/signTofly/slotSignatureVersions.js";
 import { invalidatePriorSignToFlyFlags } from "../lib/signTofly/invalidate.js";
 import { computeBriefHash, MATERIAL_BRIEF_FIELDS } from "../lib/signTofly/briefVersion.js";
 
@@ -590,7 +591,7 @@ function freezeBriefAndCountInvalidations(
   const signedBefore = new Map<string, boolean>();
   for (const team of round.teams) {
     for (const slot of team.pilots) {
-      signedBefore.set(`${team.id}:${slot.placeInTeam}`, slot.signToFly);
+      signedBefore.set(slotKey(team.id, slot.placeInTeam), slot.signToFly);
     }
   }
   invalidatePriorSignToFlyFlags(round, brief, signatures);
@@ -598,7 +599,7 @@ function freezeBriefAndCountInvalidations(
   for (const team of round.teams) {
     for (const slot of team.pilots) {
       if (
-        signedBefore.get(`${team.id}:${slot.placeInTeam}`) === true &&
+        signedBefore.get(slotKey(team.id, slot.placeInTeam)) === true &&
         slot.signToFly === false
       ) {
         invalidatedSignatureCount += 1;

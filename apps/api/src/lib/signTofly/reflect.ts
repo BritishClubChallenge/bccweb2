@@ -6,6 +6,7 @@ import type { Round, RoundBrief, Signature } from "@bccweb/types";
 import { getPrivateBlobClient, withPrivateLeaseRetry } from "../blob.js";
 import { readJson, writePrivateJson } from "../blobJson.js";
 import { listSignaturesForRound } from "./ledger.js";
+import { currentBriefVersion, isSignedAtVersion, latestSignedVersions } from "./slotSignatureVersions.js";
 
 type RoundBriefWithVersion = RoundBrief & { version?: number };
 
@@ -35,20 +36,13 @@ export function materializeSignToFly(
   brief: RoundBrief & { version?: number },
   signatures: Signature[],
 ): boolean {
-  const currentBriefVersion = brief.version ?? 1;
-  const latest = new Map<string, number>();
-
-  for (const signature of signatures) {
-    if (signature.briefVersion === null) continue;
-    const key = slotKey(signature.teamId, signature.place);
-    latest.set(key, Math.max(latest.get(key) ?? 0, signature.briefVersion));
-  }
+  const version = currentBriefVersion(brief);
+  const latest = latestSignedVersions(signatures);
 
   let changed = false;
   for (const team of round.teams) {
     for (const slot of team.pilots) {
-      const latestVersion = latest.get(slotKey(team.id, slot.placeInTeam));
-      const next = latestVersion !== undefined && latestVersion === currentBriefVersion;
+      const next = isSignedAtVersion(latest, team.id, slot.placeInTeam, version);
       if (slot.signToFly !== next) {
         slot.signToFly = next;
         changed = true;
@@ -57,10 +51,6 @@ export function materializeSignToFly(
   }
 
   return changed;
-}
-
-function slotKey(teamId: string, place: number): string {
-  return `${teamId}:${place}`;
 }
 
 async function readBriefOrNull(roundId: string): Promise<RoundBriefWithVersion | null> {
