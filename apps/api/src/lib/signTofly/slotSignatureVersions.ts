@@ -26,27 +26,42 @@ export function slotKey(teamId: string, place: number): string {
   return `${teamId}:${place}`;
 }
 
-/** The newest signature recorded for one slot. */
+/**
+ * Map key identifying one PILOT's occupancy of one slot. A slot's occupant
+ * can change over time (roster swap), and the sign-to-fly resolution must
+ * judge each occupant by their OWN signature history — not whichever
+ * occupant signed most recently for that slot position — or a pilot
+ * returning to a slot they previously signed can be shadowed by a later
+ * occupant's signature and never recover without a coordinator override.
+ */
+export function slotPilotKey(teamId: string, place: number, pilotId: string): string {
+  return `${teamId}:${place}:${pilotId}`;
+}
+
+/** The newest signature recorded for one pilot's occupancy of a slot. */
 export type LatestSignature = { version: number; pilotId: string; signedAt: string | null };
 
 /**
- * Newest signature for each slot, keyed by team and place. Signatures predating
- * brief versioning carry a null `briefVersion` and are ignored — they can never
- * satisfy a current-version check. The signing pilot is carried alongside the
- * version because a slot's occupant can change without the brief version moving.
+ * Newest signature for each pilot's occupancy of a slot, keyed by team,
+ * place, and pilot. Signatures predating brief versioning carry a null
+ * `briefVersion` and are ignored — they can never satisfy a current-version
+ * check.
  *
  * Equal versions are broken by `signedAt`, newest wins. Override signatures are
  * written to random-suffixed paths (`overrideSignaturePath`), so one slot can
  * hold several signatures at the same version — for different pilots, after a
  * roster swap — and blob listing order is lexicographic on that random suffix,
  * not chronological. Without the tie-break the winner would be arbitrary and the
- * gate could reject the pilot who actually signed.
+ * gate could reject the pilot who actually signed. Keying on the pilot as well as
+ * the slot keeps that tie-break scoped to a single pilot's own signatures, so a
+ * different pilot who later occupies (and signs) the same slot can never shadow
+ * this pilot's own record.
  */
 export function latestSignedVersions(signatures: Signature[]): Map<string, LatestSignature> {
   const latest = new Map<string, LatestSignature>();
   for (const signature of signatures) {
     if (signature.briefVersion === null) continue;
-    const key = slotKey(signature.teamId, signature.place);
+    const key = slotPilotKey(signature.teamId, signature.place, signature.pilotId);
     const current = latest.get(key);
     if (current === undefined || isNewer(signature, current)) {
       latest.set(key, {
@@ -87,8 +102,8 @@ export function isSignedAtVersion(
   pilotId: string | null,
 ): boolean {
   if (pilotId === null) return false;
-  const entry = latest.get(slotKey(teamId, place));
-  return entry !== undefined && entry.version === version && entry.pilotId === pilotId;
+  const entry = latest.get(slotPilotKey(teamId, place, pilotId));
+  return entry !== undefined && entry.version === version;
 }
 
 /**
@@ -101,7 +116,9 @@ export function isSupersededAtVersion(
   teamId: string,
   place: number,
   version: number,
+  pilotId: string | null,
 ): boolean {
-  const entry = latest.get(slotKey(teamId, place));
+  if (pilotId === null) return false;
+  const entry = latest.get(slotPilotKey(teamId, place, pilotId));
   return entry !== undefined && entry.version < version;
 }

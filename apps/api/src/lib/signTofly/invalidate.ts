@@ -14,7 +14,7 @@ export function invalidatePriorSignToFlyFlags(
 
   for (const team of round.teams) {
     for (const slot of team.pilots) {
-      if (isSupersededAtVersion(latest, team.id, slot.placeInTeam, version)) {
+      if (isSupersededAtVersion(latest, team.id, slot.placeInTeam, version, slot.pilotId)) {
         slot.signToFly = false;
       }
     }

@@ -16,27 +16,30 @@ export function signaturePath(
   roundId: string,
   teamId: string,
   place: number,
+  pilotId: string,
   briefVersion: number,
 ): string {
-  return `${latestSignaturePathPattern(roundId, teamId, place)}v${briefVersion}.json`;
+  return `${latestSignaturePathPattern(roundId, teamId, place)}${pilotId}-v${briefVersion}.json`;
 }
 
 export function overrideSignaturePath(
   roundId: string,
   teamId: string,
   place: number,
+  pilotId: string,
   briefVersion: number,
   randomShort: string,
 ): string {
-  return `${latestSignaturePathPattern(roundId, teamId, place)}v${briefVersion}-override-${randomShort}.json`;
+  return `${latestSignaturePathPattern(roundId, teamId, place)}${pilotId}-v${briefVersion}-override-${randomShort}.json`;
 }
 
 export function legacySignaturePath(
   roundId: string,
   teamId: string,
   place: number,
+  pilotId: string,
 ): string {
-  return `${latestSignaturePathPattern(roundId, teamId, place)}vlegacy.json`;
+  return `${latestSignaturePathPattern(roundId, teamId, place)}${pilotId}-vlegacy.json`;
 }
 
 export function latestSignaturePathPattern(
@@ -51,9 +54,10 @@ export async function readSignature(
   roundId: string,
   teamId: string,
   place: number,
+  pilotId: string,
   briefVersion: number,
 ): Promise<Signature | null> {
-  const path = signaturePath(roundId, teamId, place, briefVersion);
+  const path = signaturePath(roundId, teamId, place, pilotId, briefVersion);
   try {
     return await readJson(
       getPrivateBlobClient(path),
@@ -83,6 +87,15 @@ export async function listSignaturesForRound(roundId: string): Promise<Signature
   return signatures;
 }
 
+// Multiple pilots can now hold a same-version signature under one
+// team+place prefix (see signaturePath), so "first blob at the highest
+// version wins" below can return an arbitrary pilot's record on a version
+// tie. This is benign today because the only production caller,
+// roundUnregistration.ts (lines 57 and 76), only checks truthiness
+// (`if (signature) throwSignedContactCoordinator()`) — it never reads which
+// pilot the returned record belongs to. Do not change this function's
+// behavior; this is purely a note for the next person who adds a second
+// caller.
 export async function getLatestSignature(
   roundId: string,
   teamId: string,
@@ -167,8 +180,8 @@ export function extractIp(req: HttpRequest): string | null {
 
 function signatureWritePath(sig: Signature): string {
   return sig.briefVersion === null
-    ? legacySignaturePath(sig.roundId, sig.teamId, sig.place)
-    : signaturePath(sig.roundId, sig.teamId, sig.place, sig.briefVersion);
+    ? legacySignaturePath(sig.roundId, sig.teamId, sig.place, sig.pilotId)
+    : signaturePath(sig.roundId, sig.teamId, sig.place, sig.pilotId, sig.briefVersion);
 }
 
 function briefVersionFromPath(path: string): number | null {

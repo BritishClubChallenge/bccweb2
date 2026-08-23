@@ -140,13 +140,13 @@ describe("signature override endpoint", () => {
     const audit = await readAuditLines();
 
     expect(res.status).toBe(201);
-    expect(await readPrivateJson<Signature>(signaturePath(ctx.roundId, ctx.teamId, 1, 1))).toEqual(pilotSig);
-    expect(listed.filter((path) => path.includes(`${ctx.teamId}-1-v1`))).toHaveLength(2);
+    expect(await readPrivateJson<Signature>(signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1))).toEqual(pilotSig);
+    expect(listed.filter((path) => path.includes(`${ctx.teamId}-1-${ctx.pilotId}-v1`))).toHaveLength(2);
     expect(audit).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: (res.jsonBody as Signature).id,
         audit: expect.objectContaining({
-          originalSignaturePathIfAny: signaturePath(ctx.roundId, ctx.teamId, 1, 1),
+          originalSignaturePathIfAny: signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1),
           originalSignatureSourceIfAny: "pilot-self",
           pilotAndCoordSigned: true,
         }),

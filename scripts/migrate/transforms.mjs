@@ -71,8 +71,8 @@ export function manufacturerFromLegacyRow(r) {
   };
 }
 
-export function legacySignaturePath(roundId, teamId, place) {
-  return `signatures/${roundId}/${teamId}-${place}-vlegacy.json`;
+export function legacySignaturePath(roundId, teamId, place, pilotId) {
+  return `signatures/${roundId}/${teamId}-${place}-${pilotId}-vlegacy.json`;
 }
 
 export function legacyMigratedSignature({ roundId, teamId, place, pilotId, stableKey, legacyId }) {

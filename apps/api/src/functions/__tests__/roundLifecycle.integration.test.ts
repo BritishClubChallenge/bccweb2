@@ -181,7 +181,7 @@ describe("round lifecycle integration", () => {
       attemptId: locked.pureTrack?.attemptId,
     });
     expect(createPureTrackGroupsSpy).not.toHaveBeenCalled();
-    expect(await readPrivateJson<Signature>(signaturePath(ctx.roundId, ctx.teamId, 1, 1))).toMatchObject({
+    expect(await readPrivateJson<Signature>(signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1))).toMatchObject({
       pilotId: ctx.pilotId,
       source: "pilot-self",
     });
@@ -547,7 +547,7 @@ describe("round lifecycle integration", () => {
     const res = await signOwnSlot(ctx);
 
     expect(res.status).toBe(201);
-    const sig = (await readPrivateJson<Signature>(signaturePath(ctx.roundId, ctx.teamId, 1, 1)))!;
+    const sig = (await readPrivateJson<Signature>(signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1)))!;
     expect(sig).toMatchObject({
       roundId: ctx.roundId,
       teamId: ctx.teamId,

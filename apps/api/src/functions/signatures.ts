@@ -88,7 +88,7 @@ async function signOwnSlot(
     requireFrozenBrief(roundId),
   ]);
   const briefVersion = brief.version ?? 1;
-  const existing = await readSignature(roundId, teamId, placeNum, briefVersion);
+  const existing = await readSignature(roundId, teamId, placeNum, caller.pilotId, briefVersion);
   if (existing) {
     await queueReflect(roundId);
     return { status: 200, jsonBody: existing };
@@ -168,7 +168,7 @@ async function overrideSlotSignature(
     requireFrozenBrief(roundId),
   ]);
   const briefVersion = brief.version ?? 1;
-  const existing = await readSignature(roundId, teamId, placeNum, briefVersion);
+  const existing = await readSignature(roundId, teamId, placeNum, onBehalfOfPilotId, briefVersion);
   const sig = buildSignaturePayload({
     id: randomUUID(),
     roundId,
@@ -185,7 +185,7 @@ async function overrideSlotSignature(
     overrideReason: reason,
   });
 
-  const path = overrideSignaturePath(roundId, teamId, placeNum, briefVersion, randomUUID().slice(0, 8));
+  const path = overrideSignaturePath(roundId, teamId, placeNum, onBehalfOfPilotId, briefVersion, randomUUID().slice(0, 8));
   await writeSignatureToPath(sig, path);
   await appendAuditLine("sign-override", {
     ...sig,
@@ -193,7 +193,7 @@ async function overrideSlotSignature(
       whenAdded: sig.signedAt,
       signaturePath: path,
       originalSignaturePathIfAny: existing
-        ? signaturePath(roundId, teamId, placeNum, briefVersion)
+        ? signaturePath(roundId, teamId, placeNum, onBehalfOfPilotId, briefVersion)
         : null,
       originalSignatureSourceIfAny: existing?.source ?? null,
       pilotAndCoordSigned: Boolean(existing && existing.source !== "coord-override"),

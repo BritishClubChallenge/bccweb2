@@ -11,7 +11,7 @@ interface MigrateModule {
     stableKey?: string;
     legacyId?: number;
   }): unknown;
-  legacySignaturePath(roundId: string, teamId: string, place: number): string;
+  legacySignaturePath(roundId: string, teamId: string, place: number, pilotId: string): string;
 }
 
 async function loadMigrationHelpers(): Promise<MigrateModule> {
@@ -31,7 +31,7 @@ describe("legacy SignToFly migration", () => {
       stableKey: "round-1-team-1-4",
     }) as Record<string, unknown>;
 
-    expect(legacySignaturePath("round-1", "team-1", 4)).toBe("signatures/round-1/team-1-4-vlegacy.json");
+    expect(legacySignaturePath("round-1", "team-1", 4, "pilot-1")).toBe("signatures/round-1/team-1-4-pilot-1-vlegacy.json");
     expect(sig.source).toBe("legacy-migrated");
     expect(sig.signedAt).toBeNull();
     expect(sig.ip).toBeNull();

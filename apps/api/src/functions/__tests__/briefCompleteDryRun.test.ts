@@ -179,7 +179,7 @@ describe("brief-complete / reopen dryRun preview (non-mutating blast-radius)", (
     // would bump version and invalidate the prior signer.
     const seededBrief = makeBrief(ctx, { version: 1, hash: "STALE-HASH-V1" });
     await writePrivateJson(`round-briefs/${ctx.roundId}.json`, seededBrief);
-    const sigPath = signaturePath(ctx.roundId, ctx.teamId, 1, 1);
+    const sigPath = signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1);
     await writePrivateJson(sigPath, makeSignature(ctx, 1));
 
     const res = await briefComplete(ctx, { dryRun: "true" });
@@ -211,7 +211,7 @@ describe("brief-complete / reopen dryRun preview (non-mutating blast-radius)", (
       `round-briefs/${ctx.roundId}.json`,
       makeBrief(ctx, { version: 1, hash: "STALE-HASH-V1" }),
     );
-    await writePrivateJson(signaturePath(ctx.roundId, ctx.teamId, 1, 1), makeSignature(ctx, 1));
+    await writePrivateJson(signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1), makeSignature(ctx, 1));
 
     const preview = await briefComplete(ctx, { dryRun: "true" });
     expect(preview.status).toBe(200);
@@ -237,7 +237,7 @@ describe("brief-complete / reopen dryRun preview (non-mutating blast-radius)", (
     const brief = makeBrief(ctx, { version: 1 });
     brief.hash = computeBriefHash(brief); // hash matches → no bump → nothing invalidated
     await writePrivateJson(`round-briefs/${ctx.roundId}.json`, brief);
-    await writePrivateJson(signaturePath(ctx.roundId, ctx.teamId, 1, 1), makeSignature(ctx, 1));
+    await writePrivateJson(signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1), makeSignature(ctx, 1));
 
     const res = await briefComplete(ctx, { dryRun: "true" });
 
@@ -271,7 +271,7 @@ describe("brief-complete / reopen dryRun preview (non-mutating blast-radius)", (
 
   it("reopen?dryRun=true returns the currently-signed count WITHOUT changing status", async () => {
     const ctx = await seedRound({ status: "BriefComplete", signToFly: true });
-    await writePrivateJson(signaturePath(ctx.roundId, ctx.teamId, 1, 1), makeSignature(ctx, 1));
+    await writePrivateJson(signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1), makeSignature(ctx, 1));
 
     const res = await reopen(ctx, { dryRun: "true" });
 
