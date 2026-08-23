@@ -25,11 +25,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Start Azurite
-        uses: ./.github/actions/azurite
-
       - name: Set up Node with mise
         uses: ./.github/actions/setup-node-mise
+
+      # Native Azurite (npx) needs node_modules populated by the step above.
+      - name: Start Azurite
+        uses: ./.github/actions/azurite
 
       - name: Create Azurite containers
         run: node scripts/init-storage.mjs

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 British Club Challenge authors
 # SPDX-License-Identifier: MPL-2.0
 name: Start Azurite
-description: Start Azurite and wait up to 60 seconds for it to become ready
+description: Start Azurite natively (from the pinned npm devDependency) and wait up to 60 seconds for it to become ready
 
 runs:
   using: "composite"
@@ -9,10 +9,7 @@ runs:
     - name: Start Azurite
       shell: bash
       run: |
-        docker rm -f azurite >/dev/null 2>&1 || true
-        docker run -d --name azurite -p 10000:10000 -p 10001:10001 \
-          mcr.microsoft.com/azure-storage/azurite \
-          azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --skipApiVersionCheck
+        npx azurite --location .azurite --skipApiVersionCheck --silent &
 
     - name: Wait for Azurite
       shell: bash

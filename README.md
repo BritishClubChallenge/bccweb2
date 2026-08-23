@@ -43,10 +43,8 @@ mise install
 
 Provides Node 24.16.0, Terraform, and `azure-functions-core-tools` 4.12.0.
 
-You also need:
-
-- Docker (for Azurite — the Azure Storage emulator)
-- npm ≥ 10
+You also need: npm ≥ 10. No Docker required — Azurite (the Azure Storage
+emulator) runs natively from the pinned `azurite` devDependency.
 
 ## Quick Start
 
@@ -60,17 +58,17 @@ make build
 # 3. Copy local settings for the API
 cp apps/api/local.settings.example.json apps/api/local.settings.json
 
-# 4. Start the full stack (Azurite + API + web via Docker Compose)
+# 4. Start the full stack (Azurite + API + web), all native
 make dev
 ```
 
-Then open <http://localhost:3000> (Docker/Caddy) or run the Vite dev server
-directly with `make dev-web` and visit <http://localhost:5173>.
+Then visit <http://localhost:5173>. `make dev` starts everything in one
+foreground process; Ctrl-C stops it all.
 
 ### Run pieces individually
 
 ```sh
-docker compose up azurite      # Storage emulator on :10000
+make azurite                   # Storage emulator on :10000 (--skipApiVersionCheck)
 make dev-api                   # Functions host on :7071 (needs Azurite)
 make dev-web                   # Vite dev server on :5173 (proxies /api, /blob)
 ```
@@ -81,12 +79,11 @@ make dev-web                   # Vite dev server on :5173 (proxies /api, /blob)
 |---|---|
 | `make build` | Full build in dependency order |
 | `make typecheck` | `tsc --noEmit` across all workspaces |
-| `make test` | Run Vitest. **API tests require Azurite running.** |
+| `make test` | Run Vitest. **API tests require Azurite running (`make azurite`).** |
 | `npm run test:watch` | Vitest in watch mode |
 | `npm run e2e` | Playwright E2E (see [tests/e2e/README.md](tests/e2e/README.md)) |
 | `npm run lint` | ESLint across all workspaces + `tests/e2e`/`scripts`, then the SPDX license-header check |
 | `make clean` | Remove `dist/` and `*.tsbuildinfo` |
-| `make docker-down` | Stop the Docker Compose stack |
 
 Single test file: `npx vitest run path/to/file.test.ts`.
 

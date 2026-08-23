@@ -62,7 +62,7 @@ object ID of that environment's GitHub OIDC/Terraform UMI. In staging this is
 scripts and receives only its queue, data-blob, and `deploymentpackage` grants. It must
 not be confused with the Function UMI client ID.
 
-Local development, Docker, tests, and Azurite are the deliberate exception: they retain
+Local development, tests, and Azurite are the deliberate exception: they retain
 `AzureWebJobsStorage` and `BLOB_CONNECTION_STRING` and do not require Azure identities.
 Production is not deployed and must not be described as already keyless; its first apply
 will create the same secure-by-default identity configuration.
@@ -149,7 +149,7 @@ same runtime account (`stbccweb<env>rt`), but not through the same setting, and
 `BLOB_CONNECTION_STRING` is blob-only in both modes. Using it for queueing would silently
 break it.
 
-- **Local/dev/Docker/Azurite**: producers (`apps/api/src/lib/queue.ts`,
+- **Local/dev/Azurite**: producers (`apps/api/src/lib/queue.ts`,
   `apps/api/src/lib/rescoreJob.ts`, `apps/api/src/lib/igcValidationJob.ts`, via the
   `storageClients.ts` seam) and every trigger both read the `AzureWebJobsStorage`
   connection string, the only setting carrying a `QueueEndpoint` locally.

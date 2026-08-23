@@ -41,18 +41,9 @@ const AZURITE_DEV_CS =
   "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;" +
   "BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;";
 
-// If env points BlobEndpoint at the docker-compose hostname `azurite`, rewrite
-// it to 127.0.0.1 so the script works when run from the host shell.
-function rewriteDockerHost(cs) {
-  return cs.replace(
-    /BlobEndpoint=http:\/\/azurite:(\d+)/g,
-    "BlobEndpoint=http://127.0.0.1:$1",
-  );
-}
-
 const RAW_BLOB_CS = process.env.BLOB_CONNECTION_STRING;
 const BLOB_CS = RAW_BLOB_CS
-  ? rewriteDockerHost(RAW_BLOB_CS)
+  ? RAW_BLOB_CS
   : process.env.BLOB_STORAGE_ACCOUNT_NAME
     ? undefined
     : AZURITE_DEV_CS;

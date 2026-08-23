@@ -14,11 +14,10 @@ seed/load control scripts consume that file automatically. `ADMIN_PASSWORD` rema
 explicit override. Malformed, symlinked, foreign-owned, or non-0600 files fail before any
 API/storage mutation — treat this as a hard security invariant, not a convenience check.
 
-For `make docker-up`, prepare writes the override (when present) into that same private
-bind-mounted file, never into Compose environment. Make passes only the host UID/GID to
-the root `api-init` container; credential reads accept that exact host owner across the
-Linux bind boundary while retaining the regular-file, no-follow, single-link, and 0600
-checks. Docker Desktop root-owned mounts still satisfy the normal current-owner path.
+`make dev-api` (and `make dev`, which spawns it) runs the same `--prepare-credentials`
+step natively before starting the Functions host — no container, no cross-boundary
+ownership case; `assertSafeCredentialOwner` only ever checks the file is owned by the
+current user.
 
 ## `init-storage.mjs` — fatal, uniform provisioning
 

@@ -52,8 +52,6 @@ test("isInScope: # style for terraform/yaml/shell/toml + exact basenames", () =>
     "a.yaml",
     "s.sh",
     ".mise.toml",
-    "Dockerfile.dev",
-    "Caddyfile",
     "Makefile",
   ];
   for (const f of hashFiles) {
@@ -65,8 +63,7 @@ test("isInScope: # style for terraform/yaml/shell/toml + exact basenames", () =>
 
 test("isInScope: exact-basename # rules match under a directory prefix", () => {
   // Basenames are matched on the last path segment, not just at repo root.
-  assert.equal(isInScope("apps/api/Dockerfile.dev")?.prefix, "# ");
-  assert.equal(isInScope("apps/web/Caddyfile")?.prefix, "# ");
+  assert.equal(isInScope("scripts/migrate/Makefile")?.prefix, "# ");
 });
 
 test("isInScope: block style for .css", () => {
