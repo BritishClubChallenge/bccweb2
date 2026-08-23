@@ -38,7 +38,7 @@
     "@vitest/coverage-v8": "4.1.9",
     "azurite": "3.36.0",
     "eslint": "10.6.0",
-    "eslint-plugin-playwright": "2.10.4",
+    "eslint-plugin-playwright": "2.11.0",
     "eslint-plugin-react-hooks": "7.1.1",
     "eslint-plugin-react-refresh": "0.5.3",
     "globals": "17.7.0",
