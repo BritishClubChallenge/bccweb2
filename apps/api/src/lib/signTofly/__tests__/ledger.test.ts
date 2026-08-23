@@ -19,10 +19,10 @@ describe("signature ledger", () => {
 
     await writeSignature(sig);
 
-    expect(await readSignature(sig.roundId, sig.teamId, sig.place, 1)).toEqual(sig);
+    expect(await readSignature(sig.roundId, sig.teamId, sig.place, sig.pilotId, 1)).toEqual(sig);
     expect(
       await getPrivateBlockBlobClient(
-        signaturePath(sig.roundId, sig.teamId, sig.place, 1),
+        signaturePath(sig.roundId, sig.teamId, sig.place, sig.pilotId, 1),
       ).exists(),
     ).toBe(true);
   });
@@ -35,7 +35,7 @@ describe("signature ledger", () => {
     await writeSignature({ ...sig, id: randomUUID() });
 
     expect(uploadSpy).toHaveBeenCalledTimes(1);
-    expect(await readSignature(sig.roundId, sig.teamId, sig.place, 1)).toEqual(sig);
+    expect(await readSignature(sig.roundId, sig.teamId, sig.place, sig.pilotId, 1)).toEqual(sig);
     uploadSpy.mockRestore();
   });
 

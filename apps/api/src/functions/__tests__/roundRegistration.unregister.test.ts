@@ -46,7 +46,7 @@ describe("round self-unregistration endpoint", () => {
     );
     expect(
       await readPrivateJson<Signature>(
-        signaturePath(ctx.round.id, ctx.team.id, 1, 1)
+        signaturePath(ctx.round.id, ctx.team.id, 1, signature.pilotId, 1)
       )
     ).toEqual(signature);
   });

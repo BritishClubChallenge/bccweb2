@@ -111,6 +111,26 @@ describe("materializeSignToFly", () => {
     expect(changed).toBe(false);
     expect(slotFlags(round)).toEqual([true, false, false]);
   });
+
+  it("a returning pilot's own earlier signature is recognized again, even though a different pilot signed the same slot more recently in between (regression: double roster swap)", () => {
+    // Given: pilot-1 signed the slot at v1 (earlier), pilot-2 later
+    // occupied and signed the SAME slot at v1 (later signedAt), and
+    // pilot-1 has now returned to the slot.
+    const round = makeRound([makeSlot({ placeInTeam: 1, pilotId: "pilot-1", signToFly: false })]);
+    const brief = makeBrief({ version: 1 });
+    const signatures = [
+      makeSignature({ teamId: "team-1", place: 1, pilotId: "pilot-1", briefVersion: 1, signedAt: "2026-07-07T09:00:00.000Z" }),
+      makeSignature({ teamId: "team-1", place: 1, pilotId: "pilot-2", briefVersion: 1, signedAt: "2026-07-07T10:00:00.000Z" }),
+    ];
+
+    // When: the round is materialized with pilot-1 back in the slot.
+    const changed = materializeSignToFly(round, brief, signatures);
+
+    // Then: pilot-1's OWN v1 signature is recognized, even though
+    // pilot-2's signature for the same slot has a later signedAt.
+    expect(changed).toBe(true);
+    expect(slotFlags(round)).toEqual([true]);
+  });
 });
 
 describe("reflectRoundSignToFly", () => {

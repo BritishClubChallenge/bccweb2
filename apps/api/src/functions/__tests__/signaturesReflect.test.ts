@@ -106,7 +106,7 @@ async function seedReflectableRound(): Promise<{ readonly roundId: string }> {
   await writePrivateJson(`rounds/${roundId}.json`, RoundSchema, makeRound(roundId));
   await writePrivateJson(`round-briefs/${roundId}.json`, BriefSchema, makeBrief(roundId));
   await writePrivateJson(
-    signaturePath(roundId, signature.teamId, signature.place, BRIEF_VERSION),
+    signaturePath(roundId, signature.teamId, signature.place, signature.pilotId, BRIEF_VERSION),
     SignatureLedgerSchema,
     signature,
   );

@@ -888,7 +888,7 @@ async function main() {
 
     for (const signature of signaturesToWrite) {
       await uploadPrivateBlob(
-        legacySignaturePath(signature.roundId, signature.teamId, signature.place),
+        legacySignaturePath(signature.roundId, signature.teamId, signature.place, signature.pilotId),
         signature,
       );
     }

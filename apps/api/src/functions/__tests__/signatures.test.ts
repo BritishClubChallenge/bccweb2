@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Round, RoundBrief, Signature, SignToFlyWording } from "@bccweb/types";
 import { makeAuthRequest, invoke } from "../../__tests__/helpers/api.js";
 import { makeUser, readPrivateJson, writePrivateJson } from "../../__tests__/helpers/seed.js";
-import { signaturePath } from "../../lib/signTofly/ledger.js";
+import { signaturePath, listSignaturesForRound } from "../../lib/signTofly/ledger.js";
 import { computeBriefHash } from "../../lib/signTofly/briefVersion.js";
 import { reflectRoundSignToFly } from "../../lib/signTofly/reflect.js";
 import { enqueueSignToFlyReflect } from "../../lib/queue.js";
@@ -31,7 +31,7 @@ describe("signature endpoints", () => {
     const sig = res.jsonBody as Signature;
     expect(sig.pilotId).toBe(ctx.pilotId);
     expect(sig.ip).toBe("203.0.113.10");
-    expect(await readPrivateJson<Signature>(signaturePath(ctx.roundId, ctx.teamId, 1, 1))).toEqual(sig);
+    expect(await readPrivateJson<Signature>(signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1))).toEqual(sig);
     await reflectRoundSignToFly(ctx.roundId);
     const round = await readPrivateJson<Round>(`rounds/${ctx.roundId}.json`);
     expect(round?.teams[0].pilots[0].signToFly).toBe(true);
@@ -98,6 +98,76 @@ describe("signature endpoints", () => {
     expect(second.jsonBody).toEqual(first.jsonBody);
   });
 
+  it("roster swap after signing: new occupant self-signs -> gets own signature, not the former occupant's (regression #260)", async () => {
+    const ctx = await seedSignableRound();
+    const first = await sign(ctx);
+    expect(first.status).toBe(201);
+
+    // Simulate a coordinator roster swap: pilot B replaces pilot A in the
+    // slot. Brief version is untouched — team rosters are not a
+    // MATERIAL_BRIEF_FIELDS entry — reproducing issue #260 exactly.
+    const pilotBId = randomUUID();
+    const { user: pilotBUser } = await makeUser({ roles: ["Pilot"], pilotId: pilotBId });
+    const round = (await readPrivateJson<Round>(`rounds/${ctx.roundId}.json`))!;
+    round.teams[0].pilots[0].pilotId = pilotBId;
+    round.teams[0].pilots[0].snapshot = null;
+    round.teams[0].pilots[0].signToFly = false;
+    round.teams[0].pilots[0].accountedFor = false;
+    await writePrivateJson(`rounds/${ctx.roundId}.json`, round);
+
+    const second = await sign(ctx, pilotBUser.id, pilotBUser.email);
+
+    expect(second.status).toBe(201);
+    const secondSig = second.jsonBody as Signature;
+    expect(secondSig.pilotId).toBe(pilotBId);
+    expect(secondSig.userId).toBe(pilotBUser.id);
+    expect(secondSig.id).not.toBe((first.jsonBody as Signature).id);
+
+    const forSlot = (await listSignaturesForRound(ctx.roundId)).filter(
+      (s) => s.teamId === ctx.teamId && s.place === 1,
+    );
+    expect(forSlot).toHaveLength(2);
+    expect(forSlot.map((s) => s.pilotId).sort()).toEqual([ctx.pilotId, pilotBId].sort());
+  });
+
+  it("double roster swap: pilot who returns to a slot they previously signed is recognized as signed again (regression: double roster swap)", async () => {
+    const ctx = await seedSignableRound();
+    const originalPilotId = ctx.pilotId;
+    const first = await sign(ctx);
+    expect(first.status).toBe(201);
+
+    const pilotBId = randomUUID();
+    const { user: pilotBUser } = await makeUser({ roles: ["Pilot"], pilotId: pilotBId });
+    let round = (await readPrivateJson<Round>(`rounds/${ctx.roundId}.json`))!;
+    round.teams[0].pilots[0].pilotId = pilotBId;
+    round.teams[0].pilots[0].snapshot = null;
+    round.teams[0].pilots[0].signToFly = false;
+    round.teams[0].pilots[0].accountedFor = false;
+    await writePrivateJson(`rounds/${ctx.roundId}.json`, round);
+
+    const second = await sign(ctx, pilotBUser.id, pilotBUser.email);
+    expect(second.status).toBe(201);
+
+    round = (await readPrivateJson<Round>(`rounds/${ctx.roundId}.json`))!;
+    round.teams[0].pilots[0].pilotId = originalPilotId;
+    round.teams[0].pilots[0].snapshot = null;
+    round.teams[0].pilots[0].signToFly = false;
+    round.teams[0].pilots[0].accountedFor = false;
+    await writePrivateJson(`rounds/${ctx.roundId}.json`, round);
+
+    // The original pilot's self-sign hits their OWN pre-existing v1 blob
+    // from `first` -> 200, not a new write (they already hold a valid
+    // signature for the still-frozen v1 brief). What must be proven is
+    // that the reflect/lock-gate logic recognizes it as CURRENT.
+    const third = await sign(ctx, ctx.userId, ctx.email);
+    expect(third.status).toBe(200);
+    expect((third.jsonBody as Signature).pilotId).toBe(originalPilotId);
+
+    await reflectRoundSignToFly(ctx.roundId);
+    const finalRound = await readPrivateJson<Round>(`rounds/${ctx.roundId}.json`);
+    expect(finalRound?.teams[0].pilots[0].signToFly).toBe(true);
+  });
+
   it("brief version bumps after first sign -> second sign creates NEW record; old record preserved on disk", async () => {
     const ctx = await seedSignableRound();
 
@@ -109,8 +179,8 @@ describe("signature endpoints", () => {
     expect(second.status).toBe(201);
     expect((second.jsonBody as Signature).briefVersion).toBe(2);
     expect((second.jsonBody as Signature).id).not.toBe((first.jsonBody as Signature).id);
-    expect(await readPrivateJson<Signature>(signaturePath(ctx.roundId, ctx.teamId, 1, 1))).toEqual(first.jsonBody);
-    expect(await readPrivateJson<Signature>(signaturePath(ctx.roundId, ctx.teamId, 1, 2))).toEqual(second.jsonBody);
+    expect(await readPrivateJson<Signature>(signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1))).toEqual(first.jsonBody);
+    expect(await readPrivateJson<Signature>(signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 2))).toEqual(second.jsonBody);
   });
 
   it("round status not BriefComplete -> 409 INVALID_STATE", async () => {

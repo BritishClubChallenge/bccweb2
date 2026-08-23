@@ -337,7 +337,7 @@ describe("lockRound async brief PDF queue", () => {
     const ctx = await seedBriefCompleteRound();
     const briefPath = `round-briefs/${ctx.roundId}.json`;
     const roundPath = `rounds/${ctx.roundId}.json`;
-    const signaturePath = `signatures/${ctx.roundId}/${ctx.teamId}-1-v1.json`;
+    const signaturePath = `signatures/${ctx.roundId}/${ctx.teamId}-1-${ctx.pilotId}-v1.json`;
     await writePrivateJson(briefPath, frozenBrief(ctx));
     // Schema-valid signature at the canonical ledger path — lock's completeness
     // gate schema-reads every blob under signatures/{roundId}/, so a raw marker
@@ -667,13 +667,16 @@ describe("lockRound async brief PDF queue", () => {
     };
     // Former occupant sorts FIRST by blob name but signed EARLIER, so listing
     // order actively favours the wrong pilot unless signedAt decides.
+    // formerPilotId is pinned (not random) so it deterministically sorts before
+    // ctx.pilotId's random UUID, preserving this adversarial ordering every run.
+    const formerPilotId = "00000000-0000-0000-0000-000000000000";
     await writeSignatureToPath(
-      { ...base, id: randomUUID(), pilotId: randomUUID(), signedAt: "2026-06-01T10:00:00.000Z" },
-      overrideSignaturePath(ctx.roundId, ctx.teamId, 1, 1, "aaaa"),
+      { ...base, id: randomUUID(), pilotId: formerPilotId, signedAt: "2026-06-01T10:00:00.000Z" },
+      overrideSignaturePath(ctx.roundId, ctx.teamId, 1, formerPilotId, 1, "aaaa"),
     );
     await writeSignatureToPath(
       { ...base, id: randomUUID(), pilotId: ctx.pilotId, signedAt: "2026-06-01T11:00:00.000Z" },
-      overrideSignaturePath(ctx.roundId, ctx.teamId, 1, 1, "zzzz"),
+      overrideSignaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1, "zzzz"),
     );
 
     const res = await lock(ctx);

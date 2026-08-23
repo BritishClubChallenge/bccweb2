@@ -242,7 +242,7 @@ describe("briefCompleteRound — freeze + sign-to-fly invalidation (T7)", () => 
       `round-briefs/${ctx.roundId}.json`,
       makeBrief(ctx, { version: 1, hash: "STALE-HASH-V1" }),
     );
-    await writePrivateJson(signaturePath(ctx.roundId, ctx.teamId, 1, 1), makeSignature(ctx, 1));
+    await writePrivateJson(signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1), makeSignature(ctx, 1));
 
     const res = await briefComplete(ctx);
 
@@ -271,7 +271,7 @@ describe("briefCompleteRound — freeze + sign-to-fly invalidation (T7)", () => 
     const brief = makeBrief(ctx, { version: 1 });
     brief.hash = computeBriefHash(brief); // hash matches material content → NO bump
     await writePrivateJson(`round-briefs/${ctx.roundId}.json`, brief);
-    const sigPath = signaturePath(ctx.roundId, ctx.teamId, 1, 1);
+    const sigPath = signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1);
     await writePrivateJson(sigPath, makeSignature(ctx, 1));
 
     const res = await briefComplete(ctx);
@@ -292,7 +292,7 @@ describe("briefCompleteRound — freeze + sign-to-fly invalidation (T7)", () => 
     const brief = makeBrief(ctx, { version: 1 });
     brief.hash = computeBriefHash(brief);
     await writePrivateJson(`round-briefs/${ctx.roundId}.json`, brief);
-    const sigPath = signaturePath(ctx.roundId, ctx.teamId, 1, 1);
+    const sigPath = signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1);
     await writePrivateJson(sigPath, makeSignature(ctx, 1));
 
     // Move to BriefComplete first.
@@ -337,7 +337,7 @@ describe("briefCompleteRound — freeze + sign-to-fly invalidation (T7)", () => 
       `round-briefs/${ctx.roundId}.json`,
       makeBrief(ctx, { version: 1, hash: "STALE-HASH-ENFORCE" }),
     );
-    await writePrivateJson(signaturePath(ctx.roundId, ctx.teamId, 1, 1), makeSignature(ctx, 1));
+    await writePrivateJson(signaturePath(ctx.roundId, ctx.teamId, 1, ctx.pilotId, 1), makeSignature(ctx, 1));
 
     const res = await withSchemaMode("enforce", () => briefComplete(ctx));
     expect(res.status).toBe(200);
