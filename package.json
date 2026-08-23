@@ -35,7 +35,7 @@
     "@azure/storage-queue": "12.31.0",
     "@eslint/js": "10.0.1",
     "@playwright/test": "1.61.1",
-    "@vitest/coverage-v8": "4.1.9",
+    "@vitest/coverage-v8": "4.1.11",
     "azurite": "3.36.0",
     "eslint": "10.6.0",
     "eslint-plugin-playwright": "2.10.4",
