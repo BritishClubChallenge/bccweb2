@@ -38,8 +38,12 @@ export function slotPilotKey(teamId: string, place: number, pilotId: string): st
   return `${teamId}:${place}:${pilotId}`;
 }
 
-/** The newest signature recorded for one pilot's occupancy of a slot. */
-export type LatestSignature = { version: number; pilotId: string; signedAt: string | null };
+/**
+ * The newest signature recorded for one pilot's occupancy of a slot. The map
+ * key (`slotPilotKey`) already identifies the pilot, so the entry itself
+ * carries no `pilotId` — nothing reads it off a resolved entry.
+ */
+export type LatestSignature = { version: number; signedAt: string | null };
 
 /**
  * Newest signature for each pilot's occupancy of a slot, keyed by team,
@@ -66,7 +70,6 @@ export function latestSignedVersions(signatures: Signature[]): Map<string, Lates
     if (current === undefined || isNewer(signature, current)) {
       latest.set(key, {
         version: signature.briefVersion,
-        pilotId: signature.pilotId,
         signedAt: signature.signedAt,
       });
     }
