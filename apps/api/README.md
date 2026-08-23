@@ -10,8 +10,8 @@ Tests run on [Vitest](https://vitest.dev). Run the API tests with:
 
 Prerequisite:
 
-- Start Azurite first: `docker compose up azurite` (API tests create per-file
-  Azurite containers and will fail without it).
+- Start Azurite first: `make azurite` (from repo root; API tests create
+  per-file Azurite containers and will fail without it).
 
 ### PureTrack integration tests (opt-in, live API)
 

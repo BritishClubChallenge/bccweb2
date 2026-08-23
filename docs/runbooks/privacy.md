@@ -78,7 +78,7 @@ If adding a new exception, append a row with the format:
 
 ## How to Run the Scanner Locally
 
-Requires Azurite running (`docker compose up azurite`) and containers initialised:
+Requires Azurite running (`make azurite`) and containers initialised:
 
 ```sh
 node scripts/init-storage.mjs

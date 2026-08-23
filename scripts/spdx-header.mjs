@@ -74,11 +74,7 @@ const SUFFIX_STYLES = [
 ].sort((a, b) => b[0].length - a[0].length);
 
 // Exact basenames (no distinguishing extension) that take the `#` style.
-const EXACT_BASENAMES = new Map([
-  ["Dockerfile.dev", LINE_HASH],
-  ["Caddyfile", LINE_HASH],
-  ["Makefile", LINE_HASH],
-]);
+const EXACT_BASENAMES = new Map([["Makefile", LINE_HASH]]);
 
 // ─── SPDX detection ───────────────────────────────────────────────────────────
 

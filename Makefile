@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: 2026 British Club Challenge authors
 # SPDX-License-Identifier: MPL-2.0
-CONTAINER_RUNTIME ?= docker
 .PHONY: help
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-22s %s\n", $$1, $$2}' $(MAKEFILE_LIST) | sort
@@ -58,25 +57,22 @@ validate-bacpac: ## Real BACPAC validation via blob connection/account identity;
 	scripts/migrate/validate-against-bacpac.sh
 
 .PHONY: dev
-dev: docker-up ## Start full local dev stack (Docker Compose)
+dev: ## Start full local dev stack natively (Azurite + API + Web); Ctrl-C stops everything
+	node scripts/dev-stack.mjs
+
+.PHONY: azurite
+azurite: ## Start Azurite natively (no Docker); for standalone use in the 3-terminal workflow
+	npx azurite --location .azurite --skipApiVersionCheck
 
 .PHONY: dev-api
-dev-api: build-types build-scoring build-api ## Start Azure Functions host (requires Azurite)
+dev-api: build-types build-scoring build-api ## Start Azure Functions host (requires Azurite: make azurite)
+	node scripts/init-storage.mjs
 	node scripts/seed-admin.mjs --prepare-credentials
 	npm run start --workspace=apps/api
 
 .PHONY: dev-web
 dev-web: ## Start Vite dev server on :5173
 	npm run dev --workspace=apps/web
-
-.PHONY: docker-up
-docker-up: ## Start Azurite + API + Web via Docker Compose
-	node scripts/seed-admin.mjs --prepare-credentials
-	BCC_HOST_UID=$$(id -u) BCC_HOST_GID=$$(id -g) $(CONTAINER_RUNTIME) compose up --build
-
-.PHONY: docker-down
-docker-down: ## Stop Docker Compose stack
-	$(CONTAINER_RUNTIME) compose down
 
 .PHONY: seed
 seed: ## Seed admin credential + 500 pilots / 25 clubs / 50 club-teams + season fixtures

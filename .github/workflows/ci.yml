@@ -8,7 +8,7 @@ on:
     branches: [main]
 
 # Least-privilege default for every job: these jobs only read the repo (build,
-# test, lint, docker builds) — none write contents, comment, push images, or use
+# test, lint) — none write contents, comment, push images, or use
 # OIDC. Individual jobs can widen this if they ever need more.
 permissions:
   contents: read
@@ -70,14 +70,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Start Azurite
-        uses: ./.github/actions/azurite
-
       # Built dist/ is required: API tests resolve @bccweb/* from dist/.
       - name: Set up Node with mise
         uses: ./.github/actions/setup-node-mise
         with:
           build: build
+
+      # Native Azurite (npx) needs node_modules populated by the step above.
+      - name: Start Azurite
+        uses: ./.github/actions/azurite
 
       # scripts/migrate is a standalone package outside the npm workspaces, with
       # its own package-lock.json. Install it separately so that lockfile drift
@@ -191,17 +192,3 @@ jobs:
 
       - name: Check stamp storage split contract
         run: bash scripts/iac/check-stamp-storage-split.sh
-
-  # ── 2. Docker builds ────────────────────────────────────────────────────────────
-  # Build every image that docker-compose builds locally (apps/api/Dockerfile.dev
-  # and apps/web/Dockerfile.dev). `docker compose build` builds exactly the
-  # services that declare a `build:` context, keeping this in lockstep with
-  # docker-compose.yml. Azurite / init images are pulled, not built.
-  docker:
-    name: Docker builds
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Build compose images
-        run: docker compose build

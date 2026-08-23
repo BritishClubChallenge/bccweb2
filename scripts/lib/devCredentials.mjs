@@ -47,19 +47,10 @@ function parseCredentials(contents, path) {
   };
 }
 
-function configuredOwnerId(value) {
-  if (value === undefined || !/^(0|[1-9]\d*)$/u.test(value)) return undefined;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) ? parsed : undefined;
-}
-
 export function assertSafeCredentialOwner(stat, path, options = {}) {
   const currentUid = options.currentUid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
   if (currentUid === undefined || stat.uid === currentUid) return;
-  const expectedUid = options.expectedUid ?? configuredOwnerId(process.env.BCC_HOST_UID);
-  const expectedGid = options.expectedGid ?? configuredOwnerId(process.env.BCC_HOST_GID);
-  if (stat.uid === expectedUid && stat.gid === expectedGid) return;
-  throw new DevCredentialError(`admin credential file must be owned by the current user or configured host user: ${path}`);
+  throw new DevCredentialError(`admin credential file must be owned by the current user: ${path}`);
 }
 
 function assertSafeDescriptor(stat, path) {

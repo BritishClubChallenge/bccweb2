@@ -190,7 +190,7 @@ globalThis.fetch = async (_url, init) => {
   assert.doesNotMatch(result.stderr, new RegExp(TEST_PASSWORD, "u"));
 });
 
-test("credential writer initializes a private empty Docker bind placeholder", async (t) => {
+test("credential writer initializes a private empty placeholder file", async (t) => {
   // Given
   const cwd = await fixtureDir(t);
   const credentialPath = join(cwd, ".dev-credentials");
@@ -234,13 +234,13 @@ test("make seed bootstraps credentials before mutating fixture storage", async (
   assert.doesNotMatch(seedRecipe, /ADMIN_PASSWORD\s*=/u);
 });
 
-test("dev and docker startup prepare credentials without shell redirection", async () => {
+test("dev-api startup prepares credentials without shell redirection", async () => {
   // Given / When
   const makefile = await readFile(MAKEFILE, "utf8");
 
   // Then
   assert.doesNotMatch(makefile, /: > \.dev-credentials/u);
-  assert.equal((makefile.match(/seed-admin\.mjs --prepare-credentials/gu) ?? []).length >= 3, true);
+  assert.equal((makefile.match(/seed-admin\.mjs --prepare-credentials/gu) ?? []).length >= 2, true);
 });
 
 test("prepare-credentials succeeds before storage is available", async (t) => {

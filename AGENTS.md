@@ -73,7 +73,8 @@ own lockfile (pulls `mssql`, kept out of the deployed tree); root `npm ci` skips
 | `make typecheck` | `tsc --noEmit` across all workspaces.                                     |
 | `make test`      | `vitest run` (workspace mode). **Requires Azurite up for API tests.**     |
 | `make test-heavy`| The 3 excluded heavy API tests (see Testing).                            |
-| `make dev`       | Full stack via Docker Compose (Azurite + API + Web/Caddy).                |
+| `make dev`       | Full stack natively (Azurite + API + Web); Ctrl-C stops everything.       |
+| `make azurite`   | Azurite alone, natively (`--skipApiVersionCheck`), for the 3-terminal workflow. |
 | `make dev-api` / `dev-web` | Functions host `:7071` (needs Azurite) / Vite dev `:5173`.      |
 | `make seed`      | Generate/reuse private admin credentials, then seed fixtures.              |
 | `make seed-rounds` | Optional 4-round browsing data; not a `make loadtest` prerequisite.       |
@@ -84,7 +85,8 @@ own lockfile (pulls `mssql`, kept out of the deployed tree); root `npm ci` skips
 | `npm run lint`   | eslint all workspaces + `tests/e2e` + `scripts`; each workspace has its own `lint` (`eslint src --max-warnings 0`), then the SPDX header check (`license:check`). |
 
 Single-file: `npx vitest run path/to/file.test.ts`. Watch: `npm run test:watch`.
-Local dev needs Docker (or Podman) for Azurite.
+No Docker: Azurite runs natively from the pinned `azurite` devDependency via
+`make azurite` / `make dev` (`scripts/dev-stack.mjs` orchestrates the latter).
 
 **Load testing**: canonical fixtures are 500 pilots / 25 clubs / 50 teams / 10
 pilots per team, with 25 coordinators and 50 captains. `make loadtest` is one Node
@@ -114,11 +116,10 @@ Subsequent seed/load control scripts consume that file automatically. `ADMIN_PAS
 remains the explicit override. Malformed, linked, foreign-owned, or non-0600 files fail
 before API/storage mutation. Script guidance: [scripts/AGENTS.md](scripts/AGENTS.md).
 
-For `make docker-up`, prepare writes the override (when present) into that same private
-bind-mounted file, never into Compose environment. Make passes only the host UID/GID to
-the root `api-init` container; credential reads accept that exact host owner across the
-Linux bind boundary while retaining the regular-file, no-follow, single-link, and 0600
-checks. Docker Desktop root-owned mounts continue to satisfy the normal current-owner path.
+`make dev-api` (and therefore `make dev`, which just spawns it) runs the same
+`--prepare-credentials` step natively before starting the Functions host — no
+container, no cross-boundary ownership case, so `assertSafeCredentialOwner` only
+ever needs to check the file is owned by the current user.
 
 ## License headers (SPDX)
 
@@ -129,7 +130,7 @@ Every comment-capable, git-tracked source file carries a two-line MPL-2.0 SPDX h
 // SPDX-License-Identifier: MPL-2.0
 ```
 
-Use `#` for Terraform/HCL/YAML/shell/TOML/Dockerfile.dev/Caddyfile/Makefile; `/* */` for CSS.
+Use `#` for Terraform/HCL/YAML/shell/TOML/Makefile; `/* */` for CSS.
 
 The bespoke, zero-dependency checker `scripts/spdx-header.mjs` enumerates tracked files via `git ls-files` and is chained into `npm run lint` (local + the CI `lint` job — no separate workflow).
 
@@ -317,7 +318,7 @@ the full procedure.
 CI (`.github/workflows/`) is DRY: three composite actions (`.github/actions/{setup-node-mise,
 azurite,tf-setup}`) plus two reusable workflows (`deploy-app.yml`, `terraform-run.yml`) that the
 thin per-trigger workflows call. `ci.yml` (every PR/push to `main`: typecheck, lint, full build,
-Vitest incl. heavy tests with Azurite, `docker compose build`, plus a `terraform-contracts` job —
+Vitest incl. heavy tests with Azurite, plus a `terraform-contracts` job —
 offline Terraform unit tests, fixture-sync diff, and the shared-resource/stamp-storage-split
 contract scripts); `deploy-staging.yml` (push to `main` → `staging`, via `deploy-app.yml`);
 `deploy-prod.yml` (GitHub release → `prod`, via `deploy-app.yml`); `terraform.yml` calls
@@ -328,8 +329,8 @@ from mise (`.mise.toml` pins `terraform = "1"`) via the `setup-node-mise` compos
 no `hashicorp/setup-terraform` step anywhere in this repo. Prod SPA: Static Web App + routes in
 [`staticwebapp.config.json`](apps/web/public/staticwebapp.config.json)
 (kept in `apps/web/public/` so Vite copies it to the `dist/web` output-location root the SWA
-deploy uploads — SPA fallback, security headers, `/api/*` → Function App); local Docker uses Caddy with the
-same proxy shape ([`Caddyfile`](apps/web/Caddyfile)).
+deploy uploads — SPA fallback, security headers, `/api/*` → Function App); local dev's Vite
+server proxies `/api` and `/blob` the same way ([`vite.config.ts`](apps/web/vite.config.ts)).
 
 ## Operations
 

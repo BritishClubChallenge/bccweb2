@@ -65,8 +65,8 @@ function stringifyArg(value: unknown): string {
 // Browser-safe printf formatter mirroring console's %s/%d/%o substitution so
 // React warnings render readably in the gate's failure output. Deliberately
 // uses NO `node:*` builtins (e.g. util.format): this file is under apps/web's
-// tsconfig `include: ["src"]`, and the isolated web Docker build (Dockerfile.dev)
-// has no `@types/node`, so a Node import here fails `tsc --noEmit` in CI.
+// tsconfig `include: ["src"]`, which has no `@types/node`, so a Node import
+// here fails `tsc --noEmit` in CI.
 function formatArgs(args: unknown[]): string {
   if (args.length === 0) return "";
   const first = args[0];

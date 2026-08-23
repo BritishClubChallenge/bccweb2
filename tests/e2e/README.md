@@ -16,10 +16,13 @@ npx playwright install chromium
 
 ## Start the dev stack
 
-Start Azurite (Azure Storage emulator):
+Start Azurite (Azure Storage emulator) in the background, then create its
+containers/queues:
 
 ```sh
-docker compose up -d azurite
+make azurite &
+until curl -s -o /dev/null "http://127.0.0.1:10000/devstoreaccount1?comp=list"; do sleep 1; done
+node scripts/init-storage.mjs
 ```
 
 Start the API (Azure Functions) in the background:
@@ -59,7 +62,7 @@ This runs `playwright test --config tests/e2e/playwright.config.ts`.
 ```sh
 pkill -f 'func start'
 pkill -f 'vite'
-docker compose down
+pkill -f 'azurite'
 ```
 
 ## Evidence

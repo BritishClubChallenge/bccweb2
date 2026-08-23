@@ -4,7 +4,7 @@
 /**
  * seed-admin.mjs
  *
- * Idempotent admin bootstrap for the docker-compose dev stack.
+ * Idempotent admin bootstrap for the local dev stack.
  *
  * Behaviour:
  *   - Reads `user-index.json` from the private container.

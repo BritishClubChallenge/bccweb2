@@ -5,7 +5,7 @@
  *
  * - beforeAll: create both containers ("data", "data-private") in Azurite
  *
- * Requires Azurite running locally (docker-compose up azurite).
+ * Requires Azurite running locally (make azurite).
  * Uses BLOB_CONNECTION_STRING defaulting to the Azurite dev connection string.
  *
  * Per-file container isolation: each test file gets its own
