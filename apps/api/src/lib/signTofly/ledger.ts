@@ -87,34 +87,38 @@ export async function listSignaturesForRound(roundId: string): Promise<Signature
   return signatures;
 }
 
-// Multiple pilots can now hold a same-version signature under one
-// team+place prefix (see signaturePath), so "first blob at the highest
-// version wins" below can return an arbitrary pilot's record on a version
-// tie. This is benign today because the only production caller,
-// roundUnregistration.ts (lines 57 and 76), only checks truthiness
-// (`if (signature) throwSignedContactCoordinator()`) — it never reads which
-// pilot the returned record belongs to. Do not change this function's
-// behavior; this is purely a note for the next person who adds a second
-// caller.
+// Returns the newest signature made by THIS pilot for this team+place, or
+// null. The lookup is scoped by pilotId (#263): after a roster swap, a
+// former occupant's leftover signature blob must never block a different
+// occupant of the same slot, so blobs belonging to other pilots are never
+// considered. Legacy `-vlegacy.json` blobs carry no brief version and stay
+// ignored; a record whose payload pilotId does not match the filename is
+// skipped as defense-in-depth against foreign/manual writes. The remaining
+// tie — same pilot, same briefVersion override blobs differing only by
+// random suffix — picks arbitrarily, which is harmless because the sole
+// production caller (roundUnregistration.ts) only checks truthiness.
 export async function getLatestSignature(
   roundId: string,
   teamId: string,
   place: number,
+  pilotId: string,
 ): Promise<Signature | null> {
-  const prefix = latestSignaturePathPattern(roundId, teamId, place);
+  const prefix = `${latestSignaturePathPattern(roundId, teamId, place)}${pilotId}-`;
   let latest: Signature | null = null;
 
   for await (const item of getPrivateContainer().listBlobsFlat({ prefix })) {
     const version = briefVersionFromPath(item.name);
     if (version === null) continue;
-    if (latest?.briefVersion !== null && latest?.briefVersion !== undefined && latest.briefVersion >= version) {
-      continue;
-    }
-    latest = await readJson(
+    const sig = await readJson(
       getPrivateBlobClient(item.name),
       SignatureLedgerSchema,
       item.name,
     );
+    if (sig.pilotId !== pilotId) continue;
+    if (latest?.briefVersion !== null && latest?.briefVersion !== undefined && latest.briefVersion >= version) {
+      continue;
+    }
+    latest = sig;
   }
 
   return latest;
