@@ -8,7 +8,7 @@
 # exactly its pre-created stamp or shared RG.
 
 tfstate_storage_account_name = "stbccweb13afe"
-github_oidc_subject_repo     = "matt-FFFFFF@16320656/bccweb2@1264013182"
+github_oidc_subject_repo     = "BritishClubChallenge@318211912/bccweb2@1264013182"
 location                     = "swedencentral"
 
 github_environments = ["staging", "prod", "shared"]

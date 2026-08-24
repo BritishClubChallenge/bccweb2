@@ -168,7 +168,7 @@ run "canonical_github_variables_and_shared_tfvars_are_generated" {
   assert {
     condition = alltrue([
       for environment, credential in azapi_resource.tf_umi_fed_cred :
-      credential.body.properties.subject == "repo:matt-FFFFFF@16320656/bccweb2@1264013182:environment:${environment}"
+      credential.body.properties.subject == "repo:BritishClubChallenge@318211912/bccweb2@1264013182:environment:${environment}"
     ])
     error_message = "Azure federated credentials must trust GitHub's immutable repository subject claims."
   }
