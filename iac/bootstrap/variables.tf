@@ -50,7 +50,7 @@ variable "tfstate_container_prefix" {
 variable "github_repo" {
   type        = string
   description = "owner/repo selected by GitHub API resources managed during bootstrap."
-  default     = "matt-FFFFFF/bccweb2"
+  default     = "BritishClubChallenge/bccweb2"
 }
 
 variable "github_oidc_subject_repo" {
