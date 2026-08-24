@@ -338,7 +338,7 @@ describe("BOLA B — cross-club flight mutation", () => {
 // ─── Candidate C — per-pilot snapshot PII disclosure ──────────────────────────
 
 async function seedRoundWithSnapshotPii() {
-  const orgClubId = `c-org-${randomUUID().slice(0, 8)}`;
+  const orgClubId = randomUUID();
   const pilot = await makePilot({ firstName: "Snap", lastName: "Pilot" });
   const round: Round = {
     id: `bola-c-${randomUUID().slice(0, 8)}`,
@@ -384,8 +384,8 @@ async function seedRoundWithSnapshotPii() {
   await writePrivateJson(`rounds/${round.id}.json`, round);
   const { user: outsider } = await makeUser({
     roles: ["Pilot"],
-    pilotId: "c-unrelated-pilot",
-    clubId: "c-other-club",
+    pilotId: "00000000-0000-4000-8000-0000000000b2",
+    clubId: "00000000-0000-4000-8000-0000000000b3",
     emailVerified: true,
   });
   const { user: orgCoord } = await makeUser({
@@ -435,7 +435,7 @@ describe("BOLA C — round snapshot PII disclosure", () => {
 // ─── Candidate D — round brief disclosure ─────────────────────────────────────
 
 async function seedRoundWithBrief() {
-  const orgClubId = `d-org-${randomUUID().slice(0, 8)}`;
+  const orgClubId = randomUUID();
   const participant = await makePilot({ firstName: "Brief", lastName: "Flyer" });
   const round: Round = {
     id: `bola-d-${randomUUID().slice(0, 8)}`,
@@ -504,8 +504,8 @@ async function seedRoundWithBrief() {
 
   const { user: outsider } = await makeUser({
     roles: ["Pilot"],
-    pilotId: "d-unrelated-pilot",
-    clubId: "d-other-club",
+    pilotId: "00000000-0000-4000-8000-0000000000b4",
+    clubId: "00000000-0000-4000-8000-0000000000b5",
     emailVerified: true,
   });
   const { user: orgCoord } = await makeUser({
@@ -516,7 +516,7 @@ async function seedRoundWithBrief() {
   const { user: participantUser } = await makeUser({
     roles: ["Pilot"],
     pilotId: participant.id,
-    clubId: "d-other-club",
+    clubId: "00000000-0000-4000-8000-0000000000b5",
     emailVerified: true,
   });
   return { round, outsider, orgCoord, participantUser };

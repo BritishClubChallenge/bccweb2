@@ -52,13 +52,13 @@ async function writePilotSeasonClubFixture(
 
 async function exhaustAssignPilotSeasonClubBucket(user: { id: string; email: string }): Promise<void> {
   const drainPilot = await makePilot({ id: "pilot-rate-assign-drain" });
-  drainPilot.seasonClubs = [{ seasonYear: 2026, clubId: "club-rate-assign-a", clubName: "Club Rate Assign A" }];
+  drainPilot.seasonClubs = [{ seasonYear: 2026, clubId: "00000000-0000-4000-8000-0000000000a4", clubName: "Club Rate Assign A" }];
   await writePrivateJson("pilots/pilot-rate-assign-drain.json", drainPilot);
-  await writePrivateJson("clubs/club-rate-assign-a.json", { id: "club-rate-assign-a", name: "Club Rate Assign A" });
-  await writePrivateJson("season-clubs/2026/club-rate-assign-a.json", {
+  await writePrivateJson("clubs/00000000-0000-4000-8000-0000000000a4.json", { id: "00000000-0000-4000-8000-0000000000a4", name: "Club Rate Assign A" });
+  await writePrivateJson("season-clubs/2026/00000000-0000-4000-8000-0000000000a4.json", {
     id: "sc-rate-assign-a",
     seasonYear: 2026,
-    clubId: "club-rate-assign-a",
+    clubId: "00000000-0000-4000-8000-0000000000a4",
   });
 
   let exhausted = false;
@@ -70,7 +70,7 @@ async function exhaustAssignPilotSeasonClubBucket(user: { id: string; email: str
         query: { reassign: "true" },
         body: {
           pilotId: "pilot-rate-assign-drain",
-          clubId: "club-rate-assign-a",
+          clubId: "00000000-0000-4000-8000-0000000000a4",
           seasonYear: 2026,
         },
       }),
@@ -89,7 +89,7 @@ async function exhaustDeletePilotSeasonClubBucket(user: { id: string; email: str
   let exhausted = false;
   for (let i = 0; i < 60; i += 1) {
     const pilotId = `pilot-rate-delete-drain-${i}`;
-    await writePilotSeasonClubFixture(pilotId, 2026, "club-rate-delete-a", pilotFixture);
+    await writePilotSeasonClubFixture(pilotId, 2026, "00000000-0000-4000-8000-0000000000a5", pilotFixture);
     const drainRes = await invoke(
       "deletePilotSeasonClub",
       authReq(user, {
@@ -165,7 +165,7 @@ describe("pilotSeasonClubs API", () => {
   });
 
   test("assign to unregistered season-club preserves 409 CLUB_NOT_REGISTERED_FOR_SEASON", async () => {
-    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: "club-unregistered-coord" });
+    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: "00000000-0000-4000-8000-0000000000a1" });
     await makePilot({ id: "pilot-unregistered-coord" });
 
     const res = await invoke(
@@ -174,7 +174,7 @@ describe("pilotSeasonClubs API", () => {
         method: "POST",
         body: {
           pilotId: "pilot-unregistered-coord",
-          clubId: "club-unregistered-coord",
+          clubId: "00000000-0000-4000-8000-0000000000a1",
           seasonYear: 2026,
         },
       }),
@@ -224,14 +224,14 @@ describe("pilotSeasonClubs API", () => {
   });
 
   test("RoundsCoord assigns within own club -> 201", async () => {
-    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: "club-coord-a" });
+    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: "00000000-0000-4000-8000-0000000000a2" });
     await makePilot({ id: "pilot-coord-1" });
-    await writePrivateJson("clubs/club-coord-a.json", { id: "club-coord-a", name: "Club Coord A" });
-    await writePrivateJson("season-clubs/2026/club-coord-a.json", { id: "sc-coord-a", seasonYear: 2026, clubId: "club-coord-a" });
+    await writePrivateJson("clubs/00000000-0000-4000-8000-0000000000a2.json", { id: "00000000-0000-4000-8000-0000000000a2", name: "Club Coord A" });
+    await writePrivateJson("season-clubs/2026/00000000-0000-4000-8000-0000000000a2.json", { id: "sc-coord-a", seasonYear: 2026, clubId: "00000000-0000-4000-8000-0000000000a2" });
 
     const req = makeAuthRequest(user.id, user.email, {
       method: "POST",
-      body: { pilotId: "pilot-coord-1", clubId: "club-coord-a", seasonYear: 2026 },
+      body: { pilotId: "pilot-coord-1", clubId: "00000000-0000-4000-8000-0000000000a2", seasonYear: 2026 },
     });
 
     const res = await invoke("assignPilotSeasonClub", req);
@@ -239,11 +239,11 @@ describe("pilotSeasonClubs API", () => {
   });
 
   test("RoundsCoord assigns to DIFFERENT club -> 403", async () => {
-    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: "club-coord-a" });
+    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: "00000000-0000-4000-8000-0000000000a2" });
     
     const req = makeAuthRequest(user.id, user.email, {
       method: "POST",
-      body: { pilotId: "pilot-coord-2", clubId: "club-coord-b", seasonYear: 2026 },
+      body: { pilotId: "pilot-coord-2", clubId: "00000000-0000-4000-8000-0000000000a3", seasonYear: 2026 },
     });
 
     const res = await invoke("assignPilotSeasonClub", req);
@@ -251,7 +251,7 @@ describe("pilotSeasonClubs API", () => {
   });
 
   test("RoundsCoord reassign from another club returns 403 before exhausted assign rate limit", async () => {
-    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: "club-rate-assign-a" });
+    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: "00000000-0000-4000-8000-0000000000a4" });
     await writePilotSeasonClubFixture("pilot-rate-assign-forbidden", 2026, "club-rate-assign-b");
     await exhaustAssignPilotSeasonClubBucket(user);
 
@@ -262,7 +262,7 @@ describe("pilotSeasonClubs API", () => {
         query: { reassign: "true" },
         body: {
           pilotId: "pilot-rate-assign-forbidden",
-          clubId: "club-rate-assign-a",
+          clubId: "00000000-0000-4000-8000-0000000000a4",
           seasonYear: 2026,
         },
       }),
@@ -274,7 +274,7 @@ describe("pilotSeasonClubs API", () => {
   });
 
   test("RoundsCoord non-reassign missing pilot is rate-limited before pilot read", async () => {
-    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: "club-rate-assign-a" });
+    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: "00000000-0000-4000-8000-0000000000a4" });
     await exhaustAssignPilotSeasonClubBucket(user);
 
     const res = await invoke(
@@ -283,7 +283,7 @@ describe("pilotSeasonClubs API", () => {
         method: "POST",
         body: {
           pilotId: "pilot-rate-assign-missing",
-          clubId: "club-rate-assign-a",
+          clubId: "00000000-0000-4000-8000-0000000000a4",
           seasonYear: 2026,
         },
       }),
@@ -333,7 +333,7 @@ describe("pilotSeasonClubs API", () => {
   });
 
   test("RoundsCoord delete from another club returns 403 before exhausted delete rate limit", async () => {
-    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: "club-rate-delete-a" });
+    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: "00000000-0000-4000-8000-0000000000a5" });
     await writePilotSeasonClubFixture("pilot-rate-delete-forbidden", 2026, "club-rate-delete-b");
     await exhaustDeletePilotSeasonClubBucket(user);
 
