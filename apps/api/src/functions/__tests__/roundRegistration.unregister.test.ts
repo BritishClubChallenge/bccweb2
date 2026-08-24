@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
+import { randomUUID } from "node:crypto";
 import type { Round, Signature } from "@bccweb/types";
 import { describe, expect, it } from "vitest";
 import { readPrivateJson } from "../../__tests__/helpers/seed.js";
@@ -49,5 +50,50 @@ describe("round self-unregistration endpoint", () => {
         signaturePath(ctx.round.id, ctx.team.id, 1, signature.pilotId, 1)
       )
     ).toEqual(signature);
+  });
+
+  it("issue #263 repro: former occupant's signature does not block a new occupant's unregistration", async () => {
+    const ctx = await seedRegistrationRound({
+      teamSlots: [{ placeInTeam: 1, pilotId: "self" }],
+    });
+    const former = {
+      ...makeSignature(ctx),
+      id: randomUUID(),
+      pilotId: randomUUID(),
+      userId: randomUUID(),
+    };
+    await writeSignature(former);
+
+    const res = await unregister(ctx);
+
+    expect(res.status).toBe(200);
+    expect(res.jsonBody).toMatchObject({
+      removedFromTeamId: ctx.team.id,
+      removedFromPlace: 1,
+    });
+    const round = await readPrivateJson<Round>(`rounds/${ctx.round.id}.json`);
+    expect(round?.teams[0].pilots[0]).toMatchObject({
+      status: "Empty",
+      pilotId: null,
+    });
+    expect(
+      await readPrivateJson<Signature>(
+        signaturePath(ctx.round.id, ctx.team.id, 1, former.pilotId, 1)
+      )
+    ).toEqual(former);
+  });
+
+  it("own signature still blocks self-unregistration regardless of brief version", async () => {
+    const ctx = await seedRegistrationRound({
+      teamSlots: [{ placeInTeam: 1, pilotId: "self" }],
+    });
+    await writeSignature({ ...makeSignature(ctx), briefVersion: 2 });
+
+    const res = await unregister(ctx);
+
+    expect(res.status).toBe(409);
+    expect((res.jsonBody as { code: string }).code).toBe(
+      "SIGNED_CONTACT_COORD"
+    );
   });
 });

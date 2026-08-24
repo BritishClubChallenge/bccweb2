@@ -7,10 +7,12 @@ import type { Signature } from "@bccweb/types";
 import { getPrivateBlockBlobClient } from "../../blob.js";
 import {
   getLatestSignature,
+  legacySignaturePath,
   listSignaturesForRound,
   readSignature,
   signaturePath,
   writeSignature,
+  writeSignatureToPath,
 } from "../ledger.js";
 
 describe("signature ledger", () => {
@@ -43,12 +45,42 @@ describe("signature ledger", () => {
     const roundId = randomUUID();
     const teamId = randomUUID();
     const place = 3;
-    await writeSignature(makeSignature({ roundId, teamId, place, briefVersion: 1 }));
-    const v3 = makeSignature({ roundId, teamId, place, briefVersion: 3 });
+    const pilotId = randomUUID();
+    await writeSignature(makeSignature({ roundId, teamId, place, pilotId, briefVersion: 1 }));
+    const v3 = makeSignature({ roundId, teamId, place, pilotId, briefVersion: 3 });
     await writeSignature(v3);
-    await writeSignature(makeSignature({ roundId, teamId, place, briefVersion: 2 }));
+    await writeSignature(makeSignature({ roundId, teamId, place, pilotId, briefVersion: 2 }));
 
-    expect(await getLatestSignature(roundId, teamId, place)).toEqual(v3);
+    expect(await getLatestSignature(roundId, teamId, place, pilotId)).toEqual(v3);
+  });
+
+  it("getLatestSignature ignores another pilot's signatures under the same team+place", async () => {
+    const roundId = randomUUID();
+    const teamId = randomUUID();
+    const place = 2;
+    const aPilotId = randomUUID();
+    const bPilotId = randomUUID();
+    const aV3 = makeSignature({ roundId, teamId, place, pilotId: aPilotId, briefVersion: 3 });
+    await writeSignature(aV3);
+    const bV1 = makeSignature({ roundId, teamId, place, pilotId: bPilotId, briefVersion: 1 });
+    await writeSignature(bV1);
+
+    expect(await getLatestSignature(roundId, teamId, place, bPilotId)).toEqual(bV1);
+    expect(await getLatestSignature(roundId, teamId, place, aPilotId)).toEqual(aV3);
+  });
+
+  it("getLatestSignature ignores legacy version-less signatures", async () => {
+    const roundId = randomUUID();
+    const teamId = randomUUID();
+    const place = 4;
+    const pilotId = randomUUID();
+
+    await writeSignatureToPath(
+      makeSignature({ roundId, teamId, place, pilotId, briefVersion: null }),
+      legacySignaturePath(roundId, teamId, place, pilotId),
+    );
+
+    expect(await getLatestSignature(roundId, teamId, place, pilotId)).toBeNull();
   });
 
   it("listSignaturesForRound returns all under prefix", async () => {

@@ -57,7 +57,8 @@ export async function unregisterSelf(
   const signature = await getLatestSignature(
     roundId,
     existing.team.id,
-    existing.slot.placeInTeam
+    existing.slot.placeInTeam,
+    pilotId
   );
   if (signature) throwSignedContactCoordinator();
 
@@ -76,7 +77,8 @@ export async function unregisterSelf(
     const lockedSignature = await getLatestSignature(
       roundId,
       lockedSlot.team.id,
-      lockedSlot.slot.placeInTeam
+      lockedSlot.slot.placeInTeam,
+      pilotId
     );
     if (lockedSignature) throwSignedContactCoordinator();
 
