@@ -196,7 +196,10 @@ export async function runRescoreJob(
   });
 
   const auditTimestamp = new Date().toISOString();
-  await writePrivateBlob(`audit/rescore/${roundId}-${auditTimestamp}.json`, {
+  // Filename segment must satisfy assertSafeBlobPath's charset ([A-Za-z0-9._-]);
+  // raw ISO colons would fail every rescore audit write under the path guard.
+  const auditFileStamp = auditTimestamp.replace(/[-:]/g, "");
+  await writePrivateBlob(`audit/rescore/${roundId}-${auditFileStamp}.json`, {
     actorEmail: job.requestedByEmail,
     roundId,
     timestamp: auditTimestamp,
