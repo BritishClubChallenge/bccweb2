@@ -17,7 +17,10 @@ runs:
 
     - name: Install dependencies
       shell: bash
-      run: npm ci
+      # --loglevel=error suppresses deprecation warnings from transitive
+      # dependencies (notably @azure/ms-rest-js pulled in by azurite) that
+      # we cannot fix until the upstream package drops the dependency.
+      run: npm ci --loglevel=error
 
     - name: Build
       if: inputs.build != ''
