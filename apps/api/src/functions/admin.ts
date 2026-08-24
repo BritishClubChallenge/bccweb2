@@ -19,7 +19,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import type { ContainerClient } from "@azure/storage-blob";
 import type { AdminUserView, Config, Pilot, PilotEmailIndex, PilotSummary, Round, User } from "@bccweb/types";
-import { AuthCredentialSchema, ConfigPatchSchema, ConfigSchema, PilotSchema, PilotSummarySchema, RoundSchema, UserSchema } from "@bccweb/schemas";
+import { AuthCredentialSchema, ConfigPatchSchema, ConfigSchema, PilotSchema, PilotSummarySchema, RoundSchema, UserSchema, UuidIdSchema } from "@bccweb/schemas";
 import * as z from "zod/v4";
 import {
   ensureJsonIndexBlob,
@@ -373,11 +373,13 @@ async function listUsers(
 
 // Client-input role validation (inline). UserSchema's `roles` field uses
 // preprocess+normalisation for stored-blob healing; this stricter schema
-// rejects unknown roles outright on the API edge.
+// rejects unknown roles outright on the API edge, and constrains pilotId/clubId
+// to UUID format (null/omitted stay allowed) so admin-set IDs can never carry
+// path-traversal segments into blob paths.
 const RolesPayloadSchema = z.strictObject({
   roles: z.array(z.enum(["Admin", "RoundsCoord", "Pilot"])).optional(),
-  pilotId: z.string().nullable().optional(),
-  clubId: z.string().nullable().optional(),
+  pilotId: UuidIdSchema.nullable().optional(),
+  clubId: UuidIdSchema.nullable().optional(),
 });
 
 async function setUserRoles(

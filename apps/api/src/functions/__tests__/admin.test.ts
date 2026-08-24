@@ -356,24 +356,26 @@ describe("PUT /api/manage/users/{userId}/roles — schema validation & lease", (
   test("happy path: updates roles under a lease and persists", async () => {
     const { user: admin } = await bootstrapAdmin();
     const { user: target } = await makeUser({ emailVerified: true });
+    const pilotUuid = randomUUID();
+    const clubUuid = randomUUID();
 
     const req = makeAuthRequest(admin.id, admin.email, {
       method: "PUT",
       params: { userId: target.id },
-      body: { roles: ["Admin", "Pilot"], pilotId: "p-1", clubId: "c-1" },
+      body: { roles: ["Admin", "Pilot"], pilotId: pilotUuid, clubId: clubUuid },
     });
 
     const res = await invoke("setUserRoles", req);
     expect(res.status).toBe(200);
     const updated = res.jsonBody as User;
     expect(updated.roles).toEqual(["Admin", "Pilot"]);
-    expect(updated.pilotId).toBe("p-1");
-    expect(updated.clubId).toBe("c-1");
+    expect(updated.pilotId).toBe(pilotUuid);
+    expect(updated.clubId).toBe(clubUuid);
 
     const persisted = await readPrivateJson<User>(`users/${target.id}.json`);
     expect(persisted?.roles).toEqual(["Admin", "Pilot"]);
-    expect(persisted?.pilotId).toBe("p-1");
-    expect(persisted?.clubId).toBe("c-1");
+    expect(persisted?.pilotId).toBe(pilotUuid);
+    expect(persisted?.clubId).toBe(clubUuid);
   });
 
   test("returns 409 LAST_ADMIN when removing Admin from the only live admin", async () => {
@@ -457,6 +459,155 @@ describe("PUT /api/manage/users/{userId}/roles — schema validation & lease", (
         roles: ["Admin", ...firstAdminAfter.roles],
       });
     }
+  });
+});
+
+describe("PUT /api/manage/users/{userId}/roles — pilotId/clubId UUID boundary (#264)", () => {
+  test("accepts { roles } alone with 200", async () => {
+    const { user: admin } = await bootstrapAdmin();
+    const { user: target } = await makeUser({ emailVerified: true });
+
+    const res = await invoke(
+      "setUserRoles",
+      makeAuthRequest(admin.id, admin.email, {
+        method: "PUT",
+        params: { userId: target.id },
+        body: { roles: ["Pilot"] },
+      }),
+    );
+
+    expect(res.status).toBe(200);
+  });
+
+  test("accepts the production UI payload shape { roles, clubId: null } with 200", async () => {
+    const { user: admin } = await bootstrapAdmin();
+    const { user: target } = await makeUser({ emailVerified: true });
+
+    const res = await invoke(
+      "setUserRoles",
+      makeAuthRequest(admin.id, admin.email, {
+        method: "PUT",
+        params: { userId: target.id },
+        body: { roles: ["Pilot"], clubId: null },
+      }),
+    );
+
+    expect(res.status).toBe(200);
+  });
+
+  test("accepts { roles, pilotId: null } with 200", async () => {
+    const { user: admin } = await bootstrapAdmin();
+    const { user: target } = await makeUser({ emailVerified: true });
+
+    const res = await invoke(
+      "setUserRoles",
+      makeAuthRequest(admin.id, admin.email, {
+        method: "PUT",
+        params: { userId: target.id },
+        body: { roles: ["Pilot"], pilotId: null },
+      }),
+    );
+
+    expect(res.status).toBe(200);
+  });
+
+  test("accepts an uppercase UUID pilotId with 200", async () => {
+    const { user: admin } = await bootstrapAdmin();
+    const { user: target } = await makeUser({ emailVerified: true });
+
+    const res = await invoke(
+      "setUserRoles",
+      makeAuthRequest(admin.id, admin.email, {
+        method: "PUT",
+        params: { userId: target.id },
+        body: { roles: ["Pilot"], pilotId: randomUUID().toUpperCase() },
+      }),
+    );
+
+    expect(res.status).toBe(200);
+  });
+
+  test("accepts a lowercase UUID pilotId with 200 and persists it", async () => {
+    const { user: admin } = await bootstrapAdmin();
+    const { user: target } = await makeUser({ emailVerified: true });
+    const pilotUuid = randomUUID();
+
+    const res = await invoke(
+      "setUserRoles",
+      makeAuthRequest(admin.id, admin.email, {
+        method: "PUT",
+        params: { userId: target.id },
+        body: { roles: ["Pilot"], pilotId: pilotUuid },
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const persisted = await readPrivateJson<User>(`users/${target.id}.json`);
+    expect(persisted?.pilotId).toBe(pilotUuid);
+  });
+
+  test.each([
+    ["pilotId", "../x"],
+    ["pilotId", "a/b"],
+    ["pilotId", "not-a-uuid"],
+    ["pilotId", ""],
+    ["clubId", "../x"],
+    ["clubId", "a/b"],
+    ["clubId", "not-a-uuid"],
+    ["clubId", ""],
+  ])(
+    "rejects %s=%j with INVALID_ROLES_PAYLOAD and leaves the stored blob unchanged",
+    async (field, value) => {
+      const { user: admin } = await bootstrapAdmin();
+      const { user: target } = await makeUser({ emailVerified: true });
+      const before = await readPrivateJson<User>(`users/${target.id}.json`);
+
+      const res = await invoke(
+        "setUserRoles",
+        makeAuthRequest(admin.id, admin.email, {
+          method: "PUT",
+          params: { userId: target.id },
+          body: { roles: ["Pilot"], [field]: value },
+        }),
+      );
+
+      expect(res.status).toBe(400);
+      expect((res.jsonBody as { code?: string }).code).toBe("INVALID_ROLES_PAYLOAD");
+      const after = await readPrivateJson<User>(`users/${target.id}.json`);
+      expect(after).toEqual(before);
+    },
+  );
+
+  test("hostile route param yields identical INVALID_BLOB_PATH whether the referenced blob exists or not (no existence oracle)", async () => {
+    const { user: admin } = await bootstrapAdmin();
+    const { user: target } = await makeUser({ emailVerified: true });
+
+    // Both are hostile route params rejected by assertSafeBlobPath before any
+    // existence check: one normalises to the existing user's blob absent the
+    // guard; "a b" could never match a blob. Responses must be identical.
+    const targetingExisting = await invoke(
+      "setUserRoles",
+      makeAuthRequest(admin.id, admin.email, {
+        method: "PUT",
+        params: { userId: `${target.id}/../../users/${target.id}` },
+        body: { roles: ["Pilot"] },
+      }),
+    );
+    const targetingMissing = await invoke(
+      "setUserRoles",
+      makeAuthRequest(admin.id, admin.email, {
+        method: "PUT",
+        params: { userId: "a b" },
+        body: { roles: ["Pilot"] },
+      }),
+    );
+
+    expect(targetingExisting.status).toBe(400);
+    expect((targetingExisting.jsonBody as { code?: string }).code).toBe("INVALID_BLOB_PATH");
+    expect(targetingMissing.status).toBe(400);
+    expect((targetingMissing.jsonBody as { code?: string }).code).toBe("INVALID_BLOB_PATH");
+    expect((targetingExisting.jsonBody as { code?: string }).code)
+      .toBe((targetingMissing.jsonBody as { code?: string }).code);
   });
 });
 
@@ -1100,7 +1251,7 @@ describe("POST /api/manage/users/{userId}/pilot — admin create and link", () =
 
   test("returns 409 ALREADY_LINKED when the user is linked to a different pilot", async () => {
     const { user: admin } = await bootstrapAdmin();
-    const { user: target } = await makeUser({ pilotId: "existing-pilot-id" });
+    const { user: target } = await makeUser({ pilotId: "0b8f6f60-8f6d-4d29-a41d-6c24f79e63af" });
 
     const res = await createPilotForUser(admin, target.id, {
       firstName: "Grace",
