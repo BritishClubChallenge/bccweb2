@@ -13,13 +13,13 @@ function pilotIds(body: unknown): string[] {
 describe("GET /api/pilots — coord scoping", () => {
   test("RoundsCoord sees only pilots from own club", async () => {
     await writePublicJson<PilotSummary[]>("pilots.json", [
-      { id: "pilot-club-c", legacyId: null, name: "Club C Pilot", clubId: "club-C" },
-      { id: "pilot-club-d", legacyId: null, name: "Club D Pilot", clubId: "club-D" },
+      { id: "pilot-club-c", legacyId: null, name: "Club C Pilot", clubId: "00000000-0000-4000-8000-00000000000c" },
+      { id: "pilot-club-d", legacyId: null, name: "Club D Pilot", clubId: "00000000-0000-4000-8000-00000000000d" },
     ]);
 
     const { user } = await makeUser({
       roles: ["RoundsCoord"],
-      clubId: "club-C",
+      clubId: "00000000-0000-4000-8000-00000000000c",
       emailVerified: true,
     });
 
@@ -31,8 +31,8 @@ describe("GET /api/pilots — coord scoping", () => {
 
   test("Admin sees all pilots", async () => {
     await writePublicJson<PilotSummary[]>("pilots.json", [
-      { id: "pilot-club-c", legacyId: null, name: "Club C Pilot", clubId: "club-C" },
-      { id: "pilot-club-d", legacyId: null, name: "Club D Pilot", clubId: "club-D" },
+      { id: "pilot-club-c", legacyId: null, name: "Club C Pilot", clubId: "00000000-0000-4000-8000-00000000000c" },
+      { id: "pilot-club-d", legacyId: null, name: "Club D Pilot", clubId: "00000000-0000-4000-8000-00000000000d" },
     ]);
 
     const { user: admin } = await makeUser({ roles: ["Admin"], emailVerified: true });
@@ -45,8 +45,8 @@ describe("GET /api/pilots — coord scoping", () => {
 
   test("Unauthenticated request is rejected with 401", async () => {
     await writePublicJson<PilotSummary[]>("pilots.json", [
-      { id: "pilot-club-c", legacyId: null, name: "Club C Pilot", clubId: "club-C" },
-      { id: "pilot-club-d", legacyId: null, name: "Club D Pilot", clubId: "club-D" },
+      { id: "pilot-club-c", legacyId: null, name: "Club C Pilot", clubId: "00000000-0000-4000-8000-00000000000c" },
+      { id: "pilot-club-d", legacyId: null, name: "Club D Pilot", clubId: "00000000-0000-4000-8000-00000000000d" },
     ]);
 
     const res = await invoke("getPilots", makeRequest({ method: "GET" }));

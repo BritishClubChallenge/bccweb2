@@ -71,15 +71,21 @@ function getPrivateContainer(): ContainerClient {
 // ─── Path traversal guard ────────────────────────────────────────────────────
 
 // SECURITY: the Azure SDK resolves `..` segments in blob names, so a request-derived
-// path segment is a traversal sink (cross-blob read oracle + foreign-blob write).
-// Every read/write/lease helper funnels through the four accessors below, so this
-// one guard neutralises traversal for all sinks; handlers still validate ids too.
+// path segment is a traversal sink (cross-blob read oracle + foreign-blob write), and
+// any other character outside the safe set is equally unaccounted-for. Invariant: every
+// USER-INPUT-DERIVED path funnels through the four client accessors below, so this one
+// guard neutralises traversal and enforces the per-segment charset for all such sinks;
+// handlers still validate ids too. The eight documented raw-container seams (puretrack,
+// puretrackGroups, clubs, seasonClubs, signTofly/wording, signTofly/ledger prefix
+// listing, auditLog, admin config) intentionally bypass these accessors because none of
+// them interpolates user input into a path.
 export function assertSafeBlobPath(path: string): void {
   const unsafe =
     path.length === 0 ||
     path.includes("\\") ||
     /[\u0000-\u001f\u007f]/.test(path) ||
-    path.split("/").some((seg) => seg === "" || seg === "." || seg === "..");
+    path.split("/").some((seg) => seg === "" || seg === "." || seg === "..") ||
+    path.split("/").some((seg) => !/^[A-Za-z0-9._-]+$/.test(seg));
   if (unsafe) {
     throw new HttpError(400, "INVALID_BLOB_PATH", "Invalid blob path");
   }

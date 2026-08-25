@@ -9,6 +9,7 @@ import {
   jsonDeepEqual,
   lenientOptional,
   normalizeEnum,
+  UuidIdSchema,
 } from "../helpers.js";
 
 describe("healed", () => {
@@ -174,5 +175,66 @@ describe("normalizeEnum", () => {
 
     expect(schema.parse("old")).toBe("Draft");
     expect(schema.parse("Missing")).toBe("Open");
+  });
+});
+
+describe("UuidIdSchema", () => {
+  test("accepts crypto.randomUUID() output", () => {
+    expect(UuidIdSchema.safeParse(crypto.randomUUID()).success).toBe(true);
+  });
+
+  test("accepts lowercase hex UUID", () => {
+    expect(
+      UuidIdSchema.safeParse("0b8f6f60-8f6d-4d29-a41d-6c24f79e63af").success,
+    ).toBe(true);
+  });
+
+  test("accepts uppercase hex UUID", () => {
+    expect(
+      UuidIdSchema.safeParse("0B8F6F60-8F6D-4D29-A41D-6C24F79E63AF").success,
+    ).toBe(true);
+  });
+
+  test("rejects empty string", () => {
+    expect(UuidIdSchema.safeParse("").success).toBe(false);
+  });
+
+  test("rejects non-UUID text", () => {
+    expect(UuidIdSchema.safeParse("not-a-uuid").success).toBe(false);
+  });
+
+  test("rejects path separators and traversal input", () => {
+    expect(UuidIdSchema.safeParse("a/b").success).toBe(false);
+    expect(UuidIdSchema.safeParse("../x").success).toBe(false);
+  });
+
+  test("rejects wrong-length groups", () => {
+    expect(
+      UuidIdSchema.safeParse("0b8f6f6-8f6d-4d29-a41d-6c24f79e63af").success,
+    ).toBe(false);
+    expect(
+      UuidIdSchema.safeParse("0b8f6f60-8f6d-4d2-a41dd-6c24f79e63af").success,
+    ).toBe(false);
+  });
+
+  test("rejects misplaced hyphens", () => {
+    expect(
+      UuidIdSchema.safeParse("0b8f6f608f6d-4d29-a41d-6c24f79e63af").success,
+    ).toBe(false);
+    expect(
+      UuidIdSchema.safeParse("0b8f6f60-8f6d4d29-a41d-6c24f79e63af").success,
+    ).toBe(false);
+  });
+
+  test("rejects non-hex characters", () => {
+    expect(
+      UuidIdSchema.safeParse("0b8f6f60-8f6d-4d29-g41d-6c24f79e63af").success,
+    ).toBe(false);
+  });
+
+  test("rejects non-string values", () => {
+    expect(UuidIdSchema.safeParse(123).success).toBe(false);
+    expect(UuidIdSchema.safeParse(null).success).toBe(false);
+    expect(UuidIdSchema.safeParse(undefined).success).toBe(false);
   });
 });

@@ -20,6 +20,10 @@ describe("blob path traversal (finding G)", () => {
       "back\\slash.json",
       "null\u0000byte.json",
       "del\u007fchar.json",
+      "pilots/a b.json",
+      "pilots/café.json",
+      "signatures/r/team-1-x y-v1.json",
+      "users/abc+def.json",
       "",
     ])("rejects unsafe path %j", (path) => {
       expect(() => assertSafeBlobPath(path)).toThrow();
@@ -32,12 +36,18 @@ describe("blob path traversal (finding G)", () => {
       "pilots/3f9a-uuid_id.json",
       "round-briefs/uuid/image-1.png",
       "auth/tokens/deadbeef.json",
+      "signatures/0b8f6f60-8f6d-4d29-a41d-6c24f79e63af/2b5fd7e1-1f2e-4b9a-9a44-1ba13fc9e111-2-3f9a-uuid_id-v2.json",
+      "signatures/0b8f6f60-8f6d-4d29-a41d-6c24f79e63af/2b5fd7e1-1f2e-4b9a-9a44-1ba13fc9e111-2-3f9a-uuid_id-vlegacy.json",
+      "signatures/0b8f6f60-8f6d-4d29-a41d-6c24f79e63af/2b5fd7e1-1f2e-4b9a-9a44-1ba13fc9e111-2-3f9a-uuid_id-v3-override-ab12cd34.json",
+      "season-clubs/2026/index.json.lock",
+      "auth/verification-state/deadbeef-1234-4abc-8def-222222222222.json",
     ])("accepts legitimate path %j", (path) => {
       expect(() => assertSafeBlobPath(path)).not.toThrow();
     });
 
     test("getPrivateBlobClient rejects traversal at the accessor before returning a client", () => {
       expect(() => getPrivateBlobClient("season-clubs/2025/../../auth/secret.json")).toThrow();
+      expect(() => getPrivateBlobClient("users/a b.json")).toThrow();
     });
   });
 

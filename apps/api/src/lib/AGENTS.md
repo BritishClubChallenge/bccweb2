@@ -35,6 +35,14 @@ don't re-read the source.
   `getBlobServiceClient().getContainerClient(name)` so public/private names stay local to
   their existing owners.
 - `getBlobClient/getBlockBlobClient(path)` (public), `getPrivateBlobClient/...` (private).
+  All four accessors call `assertSafeBlobPath(path)` first — the single choke point for
+  every USER-INPUT-DERIVED path. Rules: non-empty path; every `/`-segment matches
+  `^[A-Za-z0-9._-]+$`; rejected outright: backslash, control chars (U+0000–U+001F,
+  U+007F), empty/`.`/`..` segments. Throws `HttpError` `400 INVALID_BLOB_PATH`.
+  The eight documented raw-container seams — `puretrack.ts`, `puretrackGroups.ts`,
+  `clubs.ts`, `seasonClubs.ts`, `signTofly/wording.ts`, `signTofly/ledger.ts` (prefix
+  listing), `auditLog.ts`, `admin.ts` (config) — intentionally bypass it because none
+  interpolates user input into a path.
 - `readBlob(client)` raw JSON parse (missing → Azure 404). `writeBlob(path,data,leaseId?,{ifNoneMatch?})`.
 - `writePrivateBlob(path,data,leaseId?,{ifNoneMatch?})` — `ifNoneMatch:"*"` = create-only.
 - `ensureJsonIndexBlob` / `ensurePrivateJsonIndexBlob(path,seed)` — create-only seed (409/412 = no-op).

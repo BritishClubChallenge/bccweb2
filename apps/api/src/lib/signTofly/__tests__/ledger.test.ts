@@ -4,11 +4,17 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { BlockBlobClient } from "@azure/storage-blob";
 import type { Signature } from "@bccweb/types";
-import { getPrivateBlockBlobClient } from "../../blob.js";
+import { HttpError } from "../../http.js";
+import {
+  assertSafeBlobPath,
+  getPrivateBlobClient,
+  getPrivateBlockBlobClient,
+} from "../../blob.js";
 import {
   getLatestSignature,
   legacySignaturePath,
   listSignaturesForRound,
+  overrideSignaturePath,
   readSignature,
   signaturePath,
   writeSignature,
@@ -95,6 +101,65 @@ describe("signature ledger", () => {
 
     expect(listed).toEqual(expect.arrayContaining(sigs));
     expect(listed).toHaveLength(2);
+  });
+
+  it("path builders emit guard-safe paths for legitimate inputs", () => {
+    const roundId = randomUUID();
+    const teamId = randomUUID();
+    const place = 5;
+    const pilotId = randomUUID();
+    const hash = "a1b2c3d4";
+
+    const versioned = signaturePath(roundId, teamId, place, pilotId, 3);
+    const override = overrideSignaturePath(roundId, teamId, place, pilotId, 3, hash);
+    const legacy = legacySignaturePath(roundId, teamId, place, pilotId);
+
+    expect(versioned).toMatch(/-v3\.json$/);
+    expect(override).toMatch(/-v3-override-a1b2c3d4\.json$/);
+    expect(legacy).toMatch(/-vlegacy\.json$/);
+
+    for (const path of [versioned, override, legacy]) {
+      expect(() => assertSafeBlobPath(path)).not.toThrow();
+    }
+  });
+
+  it("hostile pilotId is rejected by the guard before any blob client is returned", () => {
+    const roundId = randomUUID();
+    const teamId = randomUUID();
+    const place = 1;
+
+    // The builders interpolate pilotId mid-segment, so a bare "."/".." segment
+    // only arises from a traversal CHAIN; backslash bites outright (#264).
+    for (const hostilePilotId of ["../../escape", "a\\b"]) {
+      let client: unknown;
+      let caught: unknown;
+      try {
+        client = getPrivateBlobClient(signaturePath(roundId, teamId, place, hostilePilotId, 2));
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(HttpError);
+      expect((caught as HttpError).status).toBe(400);
+      expect((caught as HttpError).code).toBe("INVALID_BLOB_PATH");
+      expect(client).toBeUndefined();
+    }
+  });
+
+  it("slash-bearing pilotId splits into charset-safe segments and stays contained", () => {
+    // "a/b" and "../x" do NOT trip the guard: splitting on "/" leaves segments
+    // that all match [A-Za-z0-9._-] and none equal to "."/"..". The seam admits
+    // them as nested paths confined to signatures/<roundId>/; handler-level
+    // UUID validation is the layer that rejects such ids (#264 defense-in-depth).
+    const roundId = randomUUID();
+    const teamId = randomUUID();
+    const place = 1;
+
+    for (const slashPilotId of ["a/b", "../x"]) {
+      const path = signaturePath(roundId, teamId, place, slashPilotId, 2);
+      expect(() => assertSafeBlobPath(path)).not.toThrow();
+      expect(path.startsWith(`signatures/${roundId}/`)).toBe(true);
+    }
   });
 });
 

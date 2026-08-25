@@ -32,7 +32,7 @@ describe("GET /api/pilots/{id}/club-history", () => {
 
   it("pilot fetches another pilot's history -> 403", async () => {
     const otherPilot = await makePilot();
-    const { user } = await makeUser({ roles: ["Pilot"], pilotId: "different-pilot-id" });
+    const { user } = await makeUser({ roles: ["Pilot"], pilotId: "00000000-0000-4000-8000-0000000000b1" });
 
     const req = makeAuthRequest(user.id, user.email, { params: { id: otherPilot.id } });
     const res = await invoke("getPilotClubHistory", req);

@@ -4,6 +4,11 @@ import * as z from "zod/v4";
 
 type AnySchema = z.ZodType<unknown>;
 
+export const UuidIdSchema = z.string().regex(
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  "must be a UUID",
+);
+
 export function healed<T>(schema: z.ZodType<T>, fallback: T): z.ZodType<T> {
   return schema.catch(fallback);
 }
