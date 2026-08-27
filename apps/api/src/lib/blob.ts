@@ -78,7 +78,9 @@ function getPrivateContainer(): ContainerClient {
 // handlers still validate ids too. The eight documented raw-container seams (puretrack,
 // puretrackGroups, clubs, seasonClubs, signTofly/wording, signTofly/ledger prefix
 // listing, auditLog, admin config) intentionally bypass these accessors because none of
-// them interpolates user input into a path.
+// them interpolates user input into a path. Note: `.` and `..` satisfy the charset class
+// below (dots are in it), so the explicit dot-segment checks stay load-bearing — do not
+// fold them into the regex.
 export function assertSafeBlobPath(path: string): void {
   const unsafe =
     path.length === 0 ||
