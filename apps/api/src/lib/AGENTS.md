@@ -100,6 +100,16 @@ don't re-read the source.
 - `PiiRedactingSpanProcessor`: drops successful `Functions.health` spans (retains failed ones) and redacts PII from request/dependency span attributes (PII_FIELDS + `OTEL_PII_SPAN_ATTRS`).
 - `PiiRedactingLogRecordProcessor`: redacts PII from trackEvent/trackTrace log record attributes.
 
+## roundGates.ts — round-lifecycle 409 helpers
+
+- `findUnaccountedSlots(round)` — Filled slots with `accountedFor !== true`; backs
+  `completeRound`'s `409 PILOTS_NOT_ACCOUNTED_FOR` gate. Counts null-`pilotId` and
+  `noScore` slots (a physical-presence check, unlike `findUnsignedSlots`).
+- `formatSlotRefs(slots)` — renders `Team #place (pilotId)` joined by `"; "`;
+  shared by that gate and `lockRound`'s `SIGNATURES_INCOMPLETE` detail so both
+  read identically. `findUnsignedSlots` stays in `signTofly/completeness.ts` (it
+  needs the brief + ledger); only the round-only scan and the formatter live here.
+
 ## signTofly/ — sign-to-fly workflow
 
 - `ledger.ts` — signature path builders, `read/write/listSignaturesForRound`,

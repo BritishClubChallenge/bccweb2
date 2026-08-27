@@ -74,6 +74,7 @@ import {
 import { getTelemetryClient } from "../lib/telemetry.js";
 import { listSignaturesForRound } from "../lib/signTofly/ledger.js";
 import { findUnsignedSlots } from "../lib/signTofly/completeness.js";
+import { findUnaccountedSlots, formatSlotRefs } from "../lib/roundGates.js";
 import { materializeSignToFly } from "../lib/signTofly/reflect.js";
 import { slotKey } from "../lib/signTofly/slotSignatureVersions.js";
 import { invalidatePriorSignToFlyFlags } from "../lib/signTofly/invalidate.js";
@@ -1154,10 +1155,7 @@ async function lockRound(
         throw new HttpError(
           409,
           "SIGNATURES_INCOMPLETE",
-          "Unsigned slots: " +
-            unsigned
-              .map((s) => `${s.teamName} #${s.placeInTeam} (${s.pilotId})`)
-              .join("; "),
+          `Unsigned slots: ${formatSlotRefs(unsigned)}`,
         );
       }
 
@@ -1437,34 +1435,18 @@ async function completeRound(
       // Post-flight safety sweep: every Filled slot must be accounted for before
       // the round may complete. Checked on the leased read `r`, and before any
       // scoring or write, so a firing gate leaves the round untouched at Locked.
+      // The Filled/pilotId/noScore rules live in `findUnaccountedSlots`.
       //
       // `updateAccounted` — the only writer of `slot.accountedFor` — takes this
       // same round-blob lease, so no accounting can land between this check and
       // the commit below; unlike lockRound's signature gate there is no ledger
       // lag to reason about.
-      //
-      // Deliberately diverges from that sibling gate (`findUnsignedSlots` skips
-      // slots with no `pilotId`): being accounted for is a physical-safety check
-      // independent of pilot identity, so an occupied-but-unidentified slot must
-      // still be swept. `noScore` is likewise irrelevant — a pilot who scores
-      // nothing still has to be present and safe.
-      const unaccounted = r.teams.flatMap((team) =>
-        team.pilots
-          .filter((slot) => slot.status === "Filled" && slot.accountedFor !== true)
-          .map((slot) => ({
-            teamName: team.teamName,
-            placeInTeam: slot.placeInTeam,
-            pilotId: slot.pilotId,
-          }))
-      );
+      const unaccounted = findUnaccountedSlots(r);
       if (unaccounted.length > 0) {
         throw new HttpError(
           409,
           "PILOTS_NOT_ACCOUNTED_FOR",
-          "Unaccounted-for slots: " +
-            unaccounted
-              .map((s) => `${s.teamName} #${s.placeInTeam} (${s.pilotId})`)
-              .join("; ")
+          `Unaccounted-for slots: ${formatSlotRefs(unaccounted)}`,
         );
       }
 
