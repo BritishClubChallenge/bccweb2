@@ -224,6 +224,40 @@ describe("RoundManage follow-up fixes", () => {
     expect(screen.queryByRole("option", { name: "— none —" })).not.toBeInTheDocument();
   });
 
+  // ─── Metadata form gated by isRosterFrozen, not isLocked (todo 3) ─────────────
+
+  it("hides the metadata form at BriefComplete and shows a reopen-the-brief message", async () => {
+    state.round = makeRound({ status: "BriefComplete", isLocked: false, teams: [makeTeam()] });
+    renderPage();
+    await screen.findByText("Alpha");
+    expect(screen.queryByLabelText("Max Teams")).not.toBeInTheDocument();
+    expect(document.getElementById("round-max-teams")).toBeNull();
+    expect(await screen.findByText(/reopen the brief/i)).toBeInTheDocument();
+  });
+
+  it("hides the metadata form at Complete (isLocked is false in production at Complete)", async () => {
+    // Production sets isLocked: false once a round reaches Complete (only exactly
+    // Locked has isLocked: true) — see the `hides the captain dropdown once
+    // Complete` test above, which (mis-)sets isLocked: true. Setting it to false
+    // here means this test only stays green if the gate reads r.status via
+    // isRosterFrozen, not r.isLocked; reverting to r.isLocked would render the
+    // MetadataForm and fail this assertion.
+    state.round = makeRound({ status: "Complete", isLocked: false, teams: [makeTeam()] });
+    renderPage();
+    await screen.findByText("Alpha");
+    expect(screen.queryByLabelText("Max Teams")).not.toBeInTheDocument();
+    expect(document.getElementById("round-max-teams")).toBeNull();
+    expect(await screen.findByText(/the round is complete/i)).toBeInTheDocument();
+  });
+
+  it("still renders the metadata form at Confirmed", async () => {
+    state.round = makeRound({ status: "Confirmed", teams: [makeTeam()] });
+    renderPage();
+    await screen.findByText("Alpha");
+    expect(await screen.findByLabelText("Max Teams")).toBeInTheDocument();
+    expect(document.getElementById("round-max-teams")).not.toBeNull();
+  });
+
 });
 
 function renderPage() {
