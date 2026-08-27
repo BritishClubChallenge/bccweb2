@@ -66,3 +66,5 @@ logs/
 
 # Platwrigt MCP
 .playwright-mcp/
+.claude
+.serena

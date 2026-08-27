@@ -356,3 +356,26 @@ Execute saved plans (`.omo/plans/*.md`) in a **dedicated git worktree**, never t
 - After the **user approves the completion gate**, OFFER to run the `pr-flow` skill to open
   the PR and drive CI/Copilot review. Don't merge unless asked. On completion, fast-forward
   `main`, then `git worktree remove` + delete the branch.
+
+## Agent skills
+
+Per-repo configuration for the engineering skills (`to-tickets`, `triage`, `to-spec`,
+`wayfinder`, `improve-codebase-architecture`, `domain-modeling`). Edit the files under
+[docs/agents/](docs/agents/) directly to change any of it.
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues on `BritishClubChallenge/bccweb2`, via the `gh` CLI.
+See [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
+
+### Triage labels
+
+The five canonical triage roles, each label string equal to its name (`needs-triage`,
+`needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`).
+See [docs/agents/triage-labels.md](docs/agents/triage-labels.md).
+
+### Domain docs
+
+Single-context: one root `CONTEXT.md` glossary plus `docs/adr/` for decisions. Neither
+exists yet — `domain-modeling` creates them lazily as terms and decisions get resolved.
+See [docs/agents/domain.md](docs/agents/domain.md).
