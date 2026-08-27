@@ -70,9 +70,15 @@ The pilot leading one team on the day of one round. Transient: a captaincy means
 outside its round, and carries across neither seasons nor rounds.
 _Avoid_: team lead
 
+**Organiser**:
+The person accountable for a round on the day — that it runs, that it runs safely, and that
+everything it requires has happened. Accountable rather than hands-on: the brief may be
+delivered by someone else, and the Organiser is the one who ensures it was.
+_Avoid_: manager, round manager, controller
+
 **Briefer**:
 The person who delivers the safety brief on the day, recorded on the round brief with their
-coaching qualification.
+coaching qualification. May or may not be the Organiser.
 _Avoid_: safety officer
 
 ## Round day
