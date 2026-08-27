@@ -1,11 +1,18 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
 import { randomUUID } from "node:crypto";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PilotSlot, Round } from "@bccweb/types";
 import { makeAuthRequest, invoke } from "../../__tests__/helpers/api.js";
 import { resetAllBuckets } from "../../lib/rateLimit.js";
 import { makeUser, readPrivateJson, writePrivateJson } from "../../__tests__/helpers/seed.js";
+
+vi.mock("../../lib/recompute.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/recompute.js")>();
+  return { ...actual, recomputeSeason: vi.fn().mockResolvedValue(undefined) };
+});
+
+import { recomputeSeason } from "../../lib/recompute.js";
 import "../roundsMutate.js";
 
 interface SeedTeam {
@@ -81,7 +88,10 @@ async function complete(roundId: string, user: { id: string; email: string }) {
 }
 
 describe("completeRound — PILOTS_NOT_ACCOUNTED_FOR gate", () => {
-  beforeEach(() => resetAllBuckets());
+  beforeEach(() => {
+    resetAllBuckets();
+    vi.mocked(recomputeSeason).mockClear();
+  });
 
   it("A: single unaccounted Filled slot -> 409, round left untouched", async () => {
     const teamId = randomUUID();
@@ -112,6 +122,7 @@ describe("completeRound — PILOTS_NOT_ACCOUNTED_FOR gate", () => {
     expect(stored?.status).toBe("Locked");
     expect(stored?.isLocked).toBe(true);
     expect(stored?.scoring).toBeUndefined();
+    expect(vi.mocked(recomputeSeason)).not.toHaveBeenCalled();
   });
 
   it("B: two unaccounted Filled slots across two teams -> 409, detail lists both in order", async () => {
@@ -150,7 +161,7 @@ describe("completeRound — PILOTS_NOT_ACCOUNTED_FOR gate", () => {
     );
   });
 
-  it("C: every Filled slot accountedFor -> 200, status Complete", async () => {
+  it("C: every Filled slot accountedFor -> 200, Complete, recomputeSeason fired for the round's year", async () => {
     const teamId = randomUUID();
     const pilotId = randomUUID();
     const teams: SeedTeam[] = [
@@ -170,6 +181,8 @@ describe("completeRound — PILOTS_NOT_ACCOUNTED_FOR gate", () => {
 
     expect(res.status).toBe(200);
     expect((res.jsonBody as { status: string }).status).toBe("Complete");
+    // AC2: the happy path still fires the best-effort post-response season recompute.
+    expect(vi.mocked(recomputeSeason)).toHaveBeenCalledWith(2026);
   });
 
   it("D: Empty slot alongside accounted-for Filled slot never blocks -> 200", async () => {
