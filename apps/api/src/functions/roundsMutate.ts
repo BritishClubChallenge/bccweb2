@@ -33,7 +33,7 @@ import type {
   BriefVersion,
   Signature,
 } from "@bccweb/types";
-import { normalizeStatus } from "@bccweb/types";
+import { normalizeStatus, isRosterFrozen, rosterFrozenReason } from "@bccweb/types";
 import {
   BriefSchema,
   ConfigSchema,
@@ -350,12 +350,23 @@ async function updateRound(
     updated = await withPrivateLease(path, async (leaseId) => {
       const r = await readJson(getPrivateBlobClient(path), RoundSchema, path);
 
-      if (r.isLocked) {
-        throw new HttpError(409, "CONFLICT", "Round is locked — unlock before editing");
-      }
-
+      // Cancelled first: isRosterFrozen("Cancelled") is true as well, and the
+      // cancelled rejection must stay distinguishable from the frozen one.
       if (r.status === "Cancelled") {
         throw new HttpError(409, "ROUND_CANCELLED", "Round is cancelled — uncancel before editing");
+      }
+
+      // The Fixture — when the round is held, where, who hosts it and how many
+      // teams it has room for — is settled from BriefComplete onward, the same
+      // rule the roster uses. By then everyone is standing on the hill and the
+      // brief pilots signed against describes this site. A round arranged wrongly
+      // is cancelled and re-scheduled, never re-pointed. (CONTEXT.md: Fixture)
+      if (isRosterFrozen(r.status)) {
+        throw new HttpError(
+          409,
+          "CONFLICT",
+          `Cannot change the round's date, site, organising club or capacity while ${rosterFrozenReason(r.status)}`,
+        );
       }
 
       if (body.date && body.date !== r.date) {
@@ -431,14 +442,6 @@ async function updateRound(
   }
 
   await updateRoundsIndex(updated);
-  if (dateChanged && updated.status === "Complete") {
-    recomputeSeason(updated.season.year).catch((err) => {
-      console.error(
-        `[updateRound] recomputeSeason(${updated.season.year}) failed:`,
-        err
-      );
-    });
-  }
   return { status: 200, jsonBody: updated };
 }
 

@@ -3,6 +3,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { Link, useParams } from "react-router";
 import type { Round, PilotSummary, ClubSummary, ClubTeamSummary } from "@bccweb/types";
+import { isRosterFrozen, rosterFrozenReason } from "@bccweb/types";
 import { api, ApiError } from "../../lib/api.js";
 import { useAuth } from "../../hooks/useAuth.js";
 import { useBlob } from "../../hooks/useBlob.js";
@@ -239,9 +240,9 @@ export default function RoundManage() {
             <p style={{ color: "#888", fontSize: "0.85rem", margin: 0 }}>
               This round is cancelled. Uncancel it to edit.
             </p>
-          ) : r.isLocked ? (
+          ) : isRosterFrozen(r.status) ? (
             <p style={{ color: "#888", fontSize: "0.85rem", margin: 0 }}>
-              Unlock the round to edit metadata.
+              Round details cannot be edited while {rosterFrozenReason(r.status)}.
             </p>
           ) : (
             <MetadataForm round={r} onSaved={() => { void loadRound(); }} />
