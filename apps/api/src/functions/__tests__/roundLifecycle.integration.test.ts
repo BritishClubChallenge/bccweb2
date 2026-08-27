@@ -261,6 +261,28 @@ describe("round lifecycle integration", () => {
     expect(persisted?.teams[0]?.pilots[0]?.pilotPoints).toBe(0);
   });
 
+  it("completeRound returns 409 PILOTS_NOT_ACCOUNTED_FOR before reading config when a Filled slot is unswept", async () => {
+    const ctx = await seedLockedScorableRound();
+    const path = `rounds/${ctx.roundId}.json`;
+    const locked = (await readPrivateJson<Round>(path))!;
+    locked.teams[0].pilots[0].accountedFor = false;
+    await writePrivateJson(path, locked);
+    // Config reads fail — so a 500 here would mean the gate ran too late.
+    blobJsonHook.configReadError = Object.assign(new Error("transient config read failure"), {
+      statusCode: 503,
+    });
+
+    const res = await completeRound(ctx);
+
+    expect(res.status).toBe(409);
+    expect((res.jsonBody as { code?: string }).code).toBe("PILOTS_NOT_ACCOUNTED_FOR");
+    expect((res.jsonBody as { detail?: string }).detail).toBe(
+      `Unaccounted-for slots: Alpha #1 (${ctx.pilotId})`,
+    );
+    const persisted = await readPrivateJson<Round>(path);
+    expect(persisted).toMatchObject({ status: "Locked", isLocked: true });
+  });
+
   it("lockRound when status is not BriefComplete returns 409 INVALID_STATE-style conflict", async () => {
     const ctx = await seedLifecycleRound({ status: "Confirmed" });
 
@@ -716,7 +738,7 @@ async function seedLifecycleRound(opts: {
         placeInTeam: 1,
         isScoring: true,
         status: "Filled",
-        accountedFor: status === "Complete",
+        accountedFor: status === "Complete" || status === "Locked",
         signToFly: status === "Complete" || status === "Locked",
         noScore: false,
         pilotPoints: opts.complete ? opts.flightDistance ?? 42 : 0,

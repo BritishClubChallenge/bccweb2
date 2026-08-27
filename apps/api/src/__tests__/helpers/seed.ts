@@ -310,6 +310,8 @@ async function transitionRound(id: string, status: RoundStatus): Promise<Round> 
     ["Confirmed", "confirmRound"],
     ["BriefComplete", "briefCompleteRound"],
     ["Locked", "lockRound"],
+    // completeRound 409s unless every Filled slot is accountedFor at this point — and the
+    // lockRound step above resets them all to false, so they must be re-swept AFTER it.
     ["Complete", "completeRound"],
   ];
   for (const [stepStatus, handler] of steps) {
