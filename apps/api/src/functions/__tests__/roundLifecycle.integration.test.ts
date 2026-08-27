@@ -391,8 +391,9 @@ describe("round lifecycle integration", () => {
     expect(updated?.teams[0]?.pilots[0]?.flight?.sanityFlags).toEqual(["GPS_SPIKE"]);
   });
 
-  it("updateRound re-scores a Complete round after clearing stale flight date validation", async () => {
-    const ctx = await seedLockedScorableRound({ complete: true });
+  it("updateRound rescores a Confirmed round to zero after unlock when clearing stale flight date validation", async () => {
+    const ctx = await seedLockedScorableRound();
+    await expect(unlockRound(ctx)).resolves.toMatchObject({ status: 200 });
     await makeConfig({ flightDateValidationEnabled: true });
     const path = `rounds/${ctx.roundId}.json`;
     const round = await readPrivateJson<Round>(path);
@@ -427,61 +428,22 @@ describe("round lifecycle integration", () => {
     expect(res.status).toBe(200);
     const updated = await readPrivateJson<Round>(path);
     if (!updated) throw new Error("Expected updated round");
+    // The stale date verdict and its sanity flag go, on both flights, so the
+    // disqualified pilot is eligible for scoring again.
     expect(updated.teams[0]?.pilots[0]?.flight?.validation).toEqual({});
     expect(updated.teams[0]?.pilots[0]?.flight?.sanityFlags).toEqual(["GPS_SPIKE"]);
-    expect(updated.teams[0]?.pilots[0]?.pilotPoints).toBe(200);
     expect(updated.teams[0]?.pilots[1]?.flight?.validation).toEqual({ signature: "valid" });
     expect(updated.teams[0]?.pilots[1]?.flight?.sanityFlags).toEqual(["GPS_SPIKE"]);
-    expect(updated.teams[0]?.pilots[1]?.pilotPoints).toBe(200);
-    await recomputeSeason(ctx.year);
-    const season = await readPublicJson<Season>(`seasons/${ctx.year}.json`);
-    if (!season) throw new Error("Expected recomputed season");
-    expect(season.leagueTable[0]?.roundScores[ctx.roundId]).toBe(200);
-    const results = await readPublicJson<SeasonResults>(`results/${ctx.year}.json`);
-    if (!results) throw new Error("Expected recomputed season results");
-    const roundResult = results.find((result) => result.roundId === ctx.roundId);
-    expect(roundResult?.teamResults[0]?.pilots).toEqual(expect.arrayContaining([
-      expect.objectContaining({ pilotId: ctx.pilotId, score: 200 }),
-      expect.objectContaining({ pilotId: validPilotId, score: 200 }),
-    ]));
-  });
-
-  it("updateRound keeps a Complete round date change successful when season recompute fails", async () => {
-    // Given: publishing the re-scored Complete round fails after its private score is committed.
-    const ctx = await seedLockedScorableRound({ complete: true });
-    const original = BlobClient.prototype.beginCopyFromURL;
-    const publishSpy = vi.spyOn(BlobClient.prototype, "beginCopyFromURL")
-      .mockImplementationOnce(function (this: BlobClient, source, options) {
-        if (this.name === `seasons/${ctx.year}.json`) throw new Error("transient season publish failure");
-        return original.call(this, source, options);
-      });
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-
-    // When: the round date changes and triggers re-scoring plus a best-effort season recompute.
-    const res = await updateRoundMeta(ctx, { date: `${ctx.year}-06-10` });
-
-    // Then: the PUT succeeds with the private score committed, and an admin recompute can publish it.
-    expect(res.status).toBe(200);
-    expect(res.jsonBody).toMatchObject({
-      date: `${ctx.year}-06-10`,
-      teams: [expect.objectContaining({ score: 100 })],
-    });
-    const updated = await readPrivateJson<Round>(`rounds/${ctx.roundId}.json`);
-    expect(updated?.date).toBe(`${ctx.year}-06-10`);
-    expect(updated?.teams[0]?.score).toBe(100);
-    await vi.waitFor(() => {
-      expect(errorSpy).toHaveBeenCalledWith(
-        `[updateRound] recomputeSeason(${ctx.year}) failed:`,
-        expect.objectContaining({ message: "transient season publish failure" }),
-      );
-    });
-
-    publishSpy.mockRestore();
-    await recomputeSeason(ctx.year);
-    const season = await readPublicJson<Season>(`seasons/${ctx.year}.json`);
-    expect(season?.leagueTable[0]?.roundScores[ctx.roundId]).toBe(100);
-    const results = await readPublicJson<SeasonResults>(`results/${ctx.year}.json`);
-    expect(results?.find((result) => result.roundId === ctx.roundId)?.teamResults[0]?.score).toBe(100);
+    // And the in-lease rescore runs rather than leaving the old numbers behind.
+    // unlockRound cleared every snapshot (roundsMutate.ts unlockRound: "re-taken
+    // at next lock"), so scoreRound has no wing class to score against and the
+    // stale points go to zero instead of being carried into the next lock. This
+    // is the whole reachable range now: a date edit is only legal at Proposed or
+    // Confirmed, and a Confirmed round never carries snapshots.
+    expect(updated.scoring?.scoredAt).toEqual(expect.any(String));
+    expect(updated.teams[0]?.pilots[0]?.pilotPoints).toBe(0);
+    expect(updated.teams[0]?.pilots[1]?.pilotPoints).toBe(0);
+    expect(updated.teams[0]?.score).toBe(0);
   });
 
   it("updateRound with an unknown siteId returns 409 CONFLICT and leaves the site unchanged", async () => {
