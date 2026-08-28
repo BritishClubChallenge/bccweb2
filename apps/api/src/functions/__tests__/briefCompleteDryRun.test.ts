@@ -18,6 +18,7 @@
 
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { HttpResponseInit } from "@azure/functions";
 import type { Round, RoundBrief, RoundStatus, Season, Signature } from "@bccweb/types";
 
 import { invoke, makeAuthRequest } from "../../__tests__/helpers/api.js";
@@ -29,6 +30,7 @@ import {
   privateBlobExists,
 } from "../../__tests__/helpers/seed.js";
 import { computeBriefHash } from "../../lib/signTofly/briefVersion.js";
+import { expectedStatusDetail, ROUND_TRANSITIONS } from "../../lib/roundTransitions.js";
 import { signaturePath } from "../../lib/signTofly/ledger.js";
 import "../roundsMutate.js";
 
@@ -155,6 +157,10 @@ function briefComplete(ctx: Ctx, query: Record<string, string> = {}) {
       query,
     }),
   );
+}
+
+function errorBody(res: HttpResponseInit): { code?: string; detail?: string } {
+  return (res.jsonBody ?? {}) as { code?: string; detail?: string };
 }
 
 function reopen(ctx: Ctx, query: Record<string, string> = {}) {
@@ -291,6 +297,9 @@ describe("brief-complete / reopen dryRun preview (non-mutating blast-radius)", (
     const res = await reopen(ctx, { dryRun: "true" });
 
     expect(res.status).toBe(409);
+    expect(errorBody(res).detail).toBe(
+      expectedStatusDetail(ROUND_TRANSITIONS.reopen.from, "Confirmed"),
+    );
     expect((await readPrivateJson<Round>(`rounds/${ctx.roundId}.json`))?.status).toBe("Confirmed");
   });
 

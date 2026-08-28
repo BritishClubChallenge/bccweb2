@@ -70,7 +70,11 @@ import {
 } from "../lib/auth.js";
 import { HttpError, withErrorHandler } from "../lib/http.js";
 import { assertCanManageRound, isCoord } from "../lib/roundAuth.js";
-import { applyRoundTransition } from "../lib/roundTransitions.js";
+import {
+  applyRoundTransition,
+  expectedStatusDetail,
+  ROUND_TRANSITIONS,
+} from "../lib/roundTransitions.js";
 import { mutationRateLimit } from "../lib/rateLimit.js";
 import { updateRoundsIndex, recomputeSeason } from "../lib/recompute.js";
 import { setBriefPdfStatus } from "../lib/briefPdf.js";
@@ -766,8 +770,12 @@ async function reopenBrief(
       }
       throw new HttpError(500, "INTERNAL");
     }
-    if (round.status !== "BriefComplete") {
-      throw new HttpError(409, "CONFLICT", `Expected status BriefComplete, got ${round.status}`);
+    if (!ROUND_TRANSITIONS.reopen.from.includes(round.status)) {
+      throw new HttpError(
+        409,
+        "CONFLICT",
+        expectedStatusDetail(ROUND_TRANSITIONS.reopen.from, round.status),
+      );
     }
     return {
       status: 200,
