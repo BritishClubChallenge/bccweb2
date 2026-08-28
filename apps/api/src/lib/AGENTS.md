@@ -100,6 +100,27 @@ don't re-read the source.
 - `PiiRedactingSpanProcessor`: drops successful `Functions.health` spans (retains failed ones) and redacts PII from request/dependency span attributes (PII_FIELDS + `OTEL_PII_SPAN_ATTRS`).
 - `PiiRedactingLogRecordProcessor`: redacts PII from trackEvent/trackTrace log record attributes.
 
+## roundAuth.ts — who may act on THIS round (BOLA / IDOR)
+
+- `isCoord(roles)` — coarse "is a RoundsCoord or Admin at all" gate; step 2 of the
+  `rateLimit.ts:138-164` ordering contract, so it runs BEFORE the round is read and
+  therefore CANNOT scope a coord to a club. Always pair it with an assert below.
+- `canManageRound(caller, round)` / `assertCanManageRound(...)` — MUTATE the round: an
+  Admin, or a RoundsCoord whose `clubId` matches `round.organisingClub.id`. The assert
+  throws `403 FORBIDDEN`.
+- `canRegisterClubForRound(caller, round, clubId)` / `assertCanRegisterForClub(...)` —
+  enter teams/pilots for ONE club: a manager, or any RoundsCoord acting on their OWN club
+  (so a visiting club's coord can enter their own teams without controlling the round).
+- `canAccountForSlot(caller, round, team, slot)` / `assertCanAccountForSlot(...)` — mark a
+  slot accounted-for: a manager (any slot), the team captain (any slot in their team), or
+  the pilot themselves (their own slot only).
+- `isRoundParticipant(caller, round)` — the caller's `pilotId` occupies a `Filled` slot.
+- `canViewRoundDetail(caller, round)` — READ private round detail (incl. brief): manager
+  OR participant.
+- `redactRoundSnapshots(round)` — copy of the round with every pilot snapshot reduced to
+  `wingClass` + `pilotRating`; strips the lock-time medical/emergency/contact PII for
+  callers who may read the round but must not see it.
+
 ## roundGates.ts — round-lifecycle 409 helpers
 
 - `findUnaccountedSlots(round)` — Filled slots with `accountedFor !== true`; backs
@@ -109,6 +130,39 @@ don't re-read the source.
   shared by that gate and `lockRound`'s `SIGNATURES_INCOMPLETE` detail so both
   read identically. `findUnsignedSlots` stays in `signTofly/completeness.ts` (it
   needs the brief + ledger); only the round-only scan and the formatter live here.
+
+## roundTransitions.ts — the round state machine
+
+- `ROUND_TRANSITIONS` is the SOURCE OF TRUTH for the four PURE transitions — confirm /
+  reopen / cancel / uncancel, i.e. those whose whole mutation is `round.status = to`. Each
+  row declares `from[]`, `to`, and the rate-limit `endpoint` + `tier`, so a new pure
+  transition is a table row, not a fifth handler. `__tests__/issue8EvidenceHarness.ts`
+  derives its rate-limit evidence rows from this table, so `endpoint`/`tier` here ARE the
+  audited call sites. Transitions that do extra work (brief-complete, lock, unlock,
+  complete) deliberately stay in `functions/roundsMutate.ts`.
+- `applyRoundTransition(req, name)` runs one row end to end — auth, coarse role, lease,
+  fine scope, rate limit, status gate, leased write, index republish — and reads
+  `rounds/{id}.json` **exactly once, under the lease**. Every rejection is a thrown
+  `HttpError`, so the handlers are one-liners that wrap the result in a 200. Codes fire in
+  the order 400 → 401 → 403 (coarse role) → 404 → 403 (wrong club) → 429 → 409.
+- `mutationRateLimit` is called INSIDE the lease, **deliberately** — do not hoist it into
+  the handler. `rateLimit.ts:138-164` requires the fine scope check to resolve BEFORE the
+  limiter ("a forbidden caller must get 403, never 429"), and that check needs the round;
+  with a single read the round is only in hand under the lease, so the limiter must follow
+  it there. This is safe because `withLeaseOnClient` releases in a `finally`
+  (`blob.ts:319-331`), so the 429/409 thrown next still frees the lease, and the limiter is
+  a synchronous in-memory token bucket that issues no I/O. `_evidence.issue8.test.ts`'s
+  `coord-scope` cases for `confirmRound`/`reopenBrief`/`cancelRound`/`uncancelRound` are
+  what enforce the 403-before-429 ordering.
+- **Accepted cost, written down so it is not "fixed" or rediscovered**: rejected requests
+  (403 / 429 / 409) now contend for the round lease, and `withPrivateLease` does NOT retry
+  — that's `withPrivateLeaseRetry` — so a lost race escapes as a non-404 non-`HttpError`
+  and the module's catch maps it to `500 INTERNAL`, not a 409. Full reasoning: the Design C
+  section of the issue #274 refactor plan, plus the comment at the `mutationRateLimit` call
+  itself.
+- `expectedStatusDetail(from, actual)` — the exact 409 detail string
+  (`Expected status X or Y, got Z`), exported so `reopenBrief`'s dryRun preview cannot
+  drift from the real path.
 
 ## signTofly/ — sign-to-fly workflow
 
