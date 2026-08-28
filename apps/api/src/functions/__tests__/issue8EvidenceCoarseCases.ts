@@ -15,14 +15,18 @@ export const COARSE_SELF_CASES: readonly CallSiteCase[] = [
   { file: "pilots.ts", handler: "updatePilot", endpoint: "updatePilot", tier: "standard", forbiddenKind: "self-or-admin", setup: async () => ({ forbidden: await seedEvidenceUser({ roles: ["Pilot"], pilotId: randomUUID() }), request: { method: "PUT", params: { id: randomUUID() }, body: { firstName: "Nope" } } }) },
   { file: "roundsMutate.ts", handler: "createRound", endpoint: "createRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", {}, { date: "2026-06-01", siteId: randomUUID(), seasonYear: 2026 }) },
   { file: "roundsMutate.ts", handler: "updateRound", endpoint: "updateRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("PUT", { id: randomUUID() }, { maxTeams: 4 }) },
-  { file: "roundsMutate.ts", handler: "confirmRound", endpoint: "confirmRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
+  { file: "roundTransitions.ts", handler: "confirmRound", endpoint: "confirmRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
   { file: "roundsMutate.ts", handler: "briefCompleteRound", endpoint: "briefCompleteRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
-  { file: "roundsMutate.ts", handler: "reopenBrief", endpoint: "reopenBrief", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
+  // reopenBrief gates TWICE, once per path: ?dryRun=true takes the preview
+  // branch's own literal call site in roundsMutate.ts, and the real transition
+  // takes the table's. Both must reject the coarse caller with 403.
+  { file: "roundsMutate.ts", handler: "reopenBrief", endpoint: "reopenBrief", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }, {}, { dryRun: "true" }) },
+  { file: "roundTransitions.ts", handler: "reopenBrief", endpoint: "reopenBrief", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
   { file: "roundsMutate.ts", handler: "lockRound", endpoint: "lockRound", tier: "heavy", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
   { file: "roundsMutate.ts", handler: "unlockRound", endpoint: "unlockRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
   { file: "roundsMutate.ts", handler: "completeRound", endpoint: "completeRound", tier: "heavy", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
-  { file: "roundsMutate.ts", handler: "cancelRound", endpoint: "cancelRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
-  { file: "roundsMutate.ts", handler: "uncancelRound", endpoint: "uncancelRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
+  { file: "roundTransitions.ts", handler: "cancelRound", endpoint: "cancelRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
+  { file: "roundTransitions.ts", handler: "uncancelRound", endpoint: "uncancelRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
   { file: "teams.ts", handler: "addTeam", endpoint: "addTeam", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }, { clubId: randomUUID(), teamName: "Alpha" }) },
   { file: "teams.ts", handler: "removeTeam", endpoint: "removeTeam", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("DELETE", { id: randomUUID(), teamId: randomUUID() }) },
   { file: "teams.ts", handler: "addPilot", endpoint: "addPilot", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID(), teamId: randomUUID() }, { pilotId: randomUUID() }) },

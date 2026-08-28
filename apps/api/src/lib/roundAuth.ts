@@ -24,6 +24,16 @@ type RoundClubScope = Pick<Round, "organisingClub">;
 type RoundTeamsScope = Pick<Round, "teams">;
 
 /**
+ * Coarse role gate: is the caller a rounds coordinator at all? This is step 2
+ * of the rateLimit.ts:138-164 ordering contract — it runs before any resource
+ * read, so it CANNOT scope a RoundsCoord to a club. Always pair it with
+ * `assertCanManageRound` (or a sibling) once the round has been read.
+ */
+export function isCoord(roles: string[]): boolean {
+  return roles.includes("RoundsCoord") || roles.includes("Admin");
+}
+
+/**
  * True when the caller may MUTATE the round: an Admin, or a RoundsCoord whose
  * own club organises it. A RoundsCoord with no clubId, or whose clubId differs
  * from the round's organising club, is denied.

@@ -7,9 +7,17 @@
  * PUT    /api/rounds/{id}                  — update round metadata
  * POST   /api/rounds/{id}/confirm          — Proposed → Confirmed
  * POST   /api/rounds/{id}/brief-complete   — Confirmed → BriefComplete
+ * POST   /api/rounds/{id}/reopen           — BriefComplete → Confirmed
  * POST   /api/rounds/{id}/lock             — BriefComplete → Locked + snapshot pilots
  * POST   /api/rounds/{id}/unlock           — Locked → Confirmed
+ * POST   /api/rounds/{id}/cancel           — Proposed | Confirmed → Cancelled
+ * POST   /api/rounds/{id}/uncancel         — Cancelled → Proposed
  * POST   /api/rounds/{id}/complete         — Locked → Complete + score + recompute
+ *
+ * The four PURE status transitions (confirm, reopen, cancel, uncancel) are
+ * table-driven and live in lib/roundTransitions.ts; the handlers below are
+ * one-liners over `applyRoundTransition`. Everything still in this file does
+ * work beyond `round.status = to`.
  */
 
 import {
@@ -61,7 +69,8 @@ import {
   forbiddenResponse,
 } from "../lib/auth.js";
 import { HttpError, withErrorHandler } from "../lib/http.js";
-import { assertCanManageRound } from "../lib/roundAuth.js";
+import { assertCanManageRound, isCoord } from "../lib/roundAuth.js";
+import { applyRoundTransition } from "../lib/roundTransitions.js";
 import { mutationRateLimit } from "../lib/rateLimit.js";
 import { updateRoundsIndex, recomputeSeason } from "../lib/recompute.js";
 import { setBriefPdfStatus } from "../lib/briefPdf.js";
@@ -88,10 +97,6 @@ export interface BriefTimes {
 }
 
 // ─── Auth helpers ─────────────────────────────────────────────────────────────
-
-function isCoord(roles: string[]): boolean {
-  return roles.includes("RoundsCoord") || roles.includes("Admin");
-}
 
 async function assertManageableRound(
   caller: CallerIdentity,
@@ -445,73 +450,13 @@ async function updateRound(
   return { status: 200, jsonBody: updated };
 }
 
-// ─── Generic status transition helper ────────────────────────────────────────
-
-async function transition(
-  req: HttpRequest,
-  id: string,
-  allowedFrom: RoundStatus[],
-  to: RoundStatus,
-  extra?: (round: Round) => Promise<void>
-): Promise<HttpResponseInit | Round> {
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
-
-  await assertManageableRound(caller, id);
-
-  const path = `rounds/${id}.json`;
-  let updated: Round;
-
-  try {
-    updated = await withPrivateLease(path, async (leaseId) => {
-      const r = await readJson(getPrivateBlobClient(path), RoundSchema, path);
-
-      if (!allowedFrom.includes(r.status)) {
-        throw new HttpError(
-          409,
-          "CONFLICT",
-          `Expected status ${allowedFrom.join(" or ")}, got ${r.status}`
-        );
-      }
-
-      r.status = to;
-      if (extra) await extra(r);
-
-      await writePrivateJson(path, RoundSchema, r, leaseId);
-      return r;
-    });
-  } catch (err: unknown) {
-    if (err instanceof HttpError) throw err;
-    const e = err as { statusCode?: number };
-    if (e.statusCode === 404) throw new HttpError(404, "NOT_FOUND", "Round not found");
-    throw new HttpError(500, "INTERNAL");
-  }
-
-  return updated;
-}
-
 // ─── POST /api/rounds/{id}/confirm ────────────────────────────────────────────
 
 async function confirmRound(
   req: HttpRequest,
   _ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  const id = req.params["id"];
-  if (!id) throw new HttpError(400, "MISSING_ROUND_ID", "Missing round id");
-
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
-  await assertManageableRound(caller, id);
-  await mutationRateLimit(req, caller, "confirmRound", "standard");
-
-  const result = await transition(req, id, ["Proposed"], "Confirmed");
-  if ("status" in result && "jsonBody" in result) return result;
-  const updated = result as Round;
-  await updateRoundsIndex(updated);
-
-  return { status: 200, jsonBody: updated };
+  return { status: 200, jsonBody: await applyRoundTransition(req, "confirm") };
 }
 
 // ─── POST /api/rounds/{id}/brief-complete ─────────────────────────────────────
@@ -796,16 +741,21 @@ async function reopenBrief(
 
   const dryRun = req.query.get("dryRun") === "true";
 
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
-  await assertManageableRound(caller, id);
-  await mutationRateLimit(req, caller, "reopenBrief", "standard");
-
   // dryRun preview: validate BriefComplete (409 otherwise, matching the real
   // transition) and report how many currently-signed slots the reopen puts at
   // risk, WITHOUT changing status. Powers the RoundManage confirm modal.
+  //
+  // It carries its OWN auth preamble because it never reaches
+  // applyRoundTransition. Keeping the preamble here rather than above the
+  // branch is what stops the real path charging the reopenBrief bucket twice
+  // (30/min would become 15/min) — each path charges exactly one token.
   if (dryRun) {
+    const caller = await getCallerIdentity(req);
+    if (!caller) return unauthorizedResponse();
+    if (!isCoord(caller.roles)) return forbiddenResponse();
+    await assertManageableRound(caller, id);
+    await mutationRateLimit(req, caller, "reopenBrief", "standard");
+
     const path = `rounds/${id}.json`;
     let round: Round;
     try {
@@ -825,11 +775,13 @@ async function reopenBrief(
     };
   }
 
-  const result = await transition(req, id, ["BriefComplete"], "Confirmed");
-  if ("status" in result && "jsonBody" in result) return result;
-  const updated = result as Round;
-  await updateRoundsIndex(updated);
-  return { status: 200, jsonBody: { ...updated, invalidatedSignatureCount: 0 } };
+  return {
+    status: 200,
+    jsonBody: {
+      ...(await applyRoundTransition(req, "reopen")),
+      invalidatedSignatureCount: 0,
+    },
+  };
 }
 
 // ─── POST /api/rounds/{id}/lock ───────────────────────────────────────────────
@@ -1335,20 +1287,7 @@ async function cancelRound(
   req: HttpRequest,
   _ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  const id = req.params["id"];
-  if (!id) throw new HttpError(400, "MISSING_ROUND_ID", "Missing round id");
-
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
-  await assertManageableRound(caller, id);
-  await mutationRateLimit(req, caller, "cancelRound", "standard");
-
-  const result = await transition(req, id, ["Proposed", "Confirmed"], "Cancelled");
-  if ("status" in result && "jsonBody" in result) return result;
-  const updated = result as Round;
-  await updateRoundsIndex(updated);
-  return { status: 200, jsonBody: updated };
+  return { status: 200, jsonBody: await applyRoundTransition(req, "cancel") };
 }
 
 // ─── POST /api/rounds/{id}/uncancel ───────────────────────────────────────────
@@ -1360,20 +1299,7 @@ async function uncancelRound(
   req: HttpRequest,
   _ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  const id = req.params["id"];
-  if (!id) throw new HttpError(400, "MISSING_ROUND_ID", "Missing round id");
-
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
-  await assertManageableRound(caller, id);
-  await mutationRateLimit(req, caller, "uncancelRound", "standard");
-
-  const result = await transition(req, id, ["Cancelled"], "Proposed");
-  if ("status" in result && "jsonBody" in result) return result;
-  const updated = result as Round;
-  await updateRoundsIndex(updated);
-  return { status: 200, jsonBody: updated };
+  return { status: 200, jsonBody: await applyRoundTransition(req, "uncancel") };
 }
 
 // ─── POST /api/rounds/{id}/complete ───────────────────────────────────────────

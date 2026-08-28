@@ -15,8 +15,10 @@ import {
   mutationRateLimit,
   type MutationRateLimitTier,
 } from "../../lib/rateLimit.js";
+import { ROUND_TRANSITIONS } from "../../lib/roundTransitions.js";
 import { EvidenceHttpRequest } from "./issue8EvidenceRequest.js";
 
+/** Handler modules scanned for LITERAL mutationRateLimit call sites. */
 export const SOURCE_FILES = [
   "admin.ts",
   "adminWording.ts",
@@ -34,6 +36,17 @@ export const SOURCE_FILES = [
   "teams.ts",
   "teamsCaptain.ts",
 ] as const;
+
+/**
+ * Modules OUTSIDE functions/ that gate on mutationRateLimit. Kept separate from
+ * SOURCE_FILES because that list is resolved against the functions directory —
+ * appending to it would send the scanner looking for functions/roundTransitions.ts.
+ */
+export const TABLE_SOURCE_FILES = ["roundTransitions.ts"] as const;
+
+export type EvidenceSourceFile =
+  | (typeof SOURCE_FILES)[number]
+  | (typeof TABLE_SOURCE_FILES)[number];
 
 export type TestUser = {
   readonly id: string;
@@ -56,7 +69,7 @@ export type CaseContext = {
 };
 
 export type CallSiteCase = {
-  readonly file: (typeof SOURCE_FILES)[number];
+  readonly file: EvidenceSourceFile;
   readonly handler: string;
   readonly endpoint: string;
   readonly tier: MutationRateLimitTier;
@@ -163,40 +176,68 @@ export async function saturateOwnBucket(
 export function adminOnly(
   method: string,
   params: Record<string, string> = {},
-  body: unknown = {}
+  body: unknown = {},
+  query: Record<string, string> = {}
 ): () => Promise<CaseContext> {
   return async () => ({
     forbidden: await seedEvidenceUser({
       roles: ["Pilot"],
       pilotId: randomUUID(),
     }),
-    request: { method, params, body },
+    request: { method, params, query, body },
   });
 }
 
 export function coordCoarse(
   method: string,
   params: Record<string, string> = {},
-  body: unknown = {}
+  body: unknown = {},
+  query: Record<string, string> = {}
 ): () => Promise<CaseContext> {
-  return adminOnly(method, params, body);
+  return adminOnly(method, params, body, query);
 }
 
 export async function crossClubCoord(): Promise<TestUser> {
   return seedEvidenceUser({ roles: ["RoundsCoord"], clubId: randomUUID() });
 }
 
+/**
+ * Every mutationRateLimit gate in the API, as `{file, endpoint, tier}` rows.
+ *
+ * Two scanners, because there are two shapes of call site:
+ * 1. handler modules pass string LITERALS, so the regex reads them directly;
+ * 2. lib/roundTransitions.ts passes `spec.endpoint` / `spec.tier` from
+ *    ROUND_TRANSITIONS, which no regex can resolve — so the source scan only
+ *    proves the gate is still THERE, and the rows are derived from the table
+ *    itself. Deriving beats re-listing: the evidence cannot drift from the
+ *    table, and deleting the gate empties the rows rather than silently
+ *    passing.
+ */
 export async function sourceMutationCallSites(
   functionsDirectory: string
 ): Promise<readonly { file: string; endpoint: string; tier: string }[]> {
   const rows: Array<{ file: string; endpoint: string; tier: string }> = [];
-  const pattern =
+  const literalPattern =
     /mutationRateLimit\(\s*req,\s*caller,\s*"([^"]+)",\s*"([^"]+)"\s*\)/g;
   for (const file of SOURCE_FILES) {
     const source = await fs.readFile(path.join(functionsDirectory, file), "utf8");
-    for (const match of source.matchAll(pattern)) {
+    for (const match of source.matchAll(literalPattern)) {
       rows.push({ file, endpoint: match[1], tier: match[2] });
     }
   }
+
+  const tablePattern =
+    /mutationRateLimit\(\s*req,\s*caller,\s*spec\.endpoint,\s*spec\.tier\s*\)/g;
+  const libraryDirectory = path.resolve(functionsDirectory, "..", "lib");
+  for (const file of TABLE_SOURCE_FILES) {
+    const source = await fs.readFile(path.join(libraryDirectory, file), "utf8");
+    const gates = source.match(tablePattern)?.length ?? 0;
+    for (let gate = 0; gate < gates; gate += 1) {
+      for (const spec of Object.values(ROUND_TRANSITIONS)) {
+        rows.push({ file, endpoint: spec.endpoint, tier: spec.tier });
+      }
+    }
+  }
+
   return rows;
 }
