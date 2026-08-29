@@ -45,7 +45,7 @@ function isAdmin(caller: CallerIdentity): boolean {
   return caller.roles.includes("Admin");
 }
 
-function isCoordOfClub(caller: CallerIdentity, clubId: string): boolean {
+function canCoordinateClub(caller: CallerIdentity, clubId: string): boolean {
   return caller.roles.includes("RoundsCoord") && caller.clubId === clubId;
 }
 
@@ -97,7 +97,7 @@ async function getSiteById(
     throw new HttpError(500, "INTERNAL");
   }
 
-  if (!isAdmin(caller) && !isCoordOfClub(caller, site.clubId)) {
+  if (!isAdmin(caller) && !canCoordinateClub(caller, site.clubId)) {
     return forbiddenResponse();
   }
 
@@ -141,7 +141,7 @@ async function createSite(
     throw new HttpError(400, "INVALID_BODY", "clubId is required");
   }
 
-  if (!isAdmin(caller) && !isCoordOfClub(caller, body.clubId)) {
+  if (!isAdmin(caller) && !canCoordinateClub(caller, body.clubId)) {
     return forbiddenResponse();
   }
 
@@ -197,7 +197,7 @@ async function updateSite(
     throw new HttpError(500, "INTERNAL");
   }
 
-  if (!isAdmin(caller) && !isCoordOfClub(caller, existing.clubId)) {
+  if (!isAdmin(caller) && !canCoordinateClub(caller, existing.clubId)) {
     return forbiddenResponse();
   }
 
@@ -269,7 +269,7 @@ async function deleteSite(
     throw new HttpError(500, "INTERNAL");
   }
 
-  if (!isAdmin(caller) && !isCoordOfClub(caller, existing.clubId)) {
+  if (!isAdmin(caller) && !canCoordinateClub(caller, existing.clubId)) {
     return forbiddenResponse();
   }
 

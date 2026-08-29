@@ -25,14 +25,10 @@ import {
   forbiddenResponse,
 } from "../lib/auth.js";
 import { HttpError, withErrorHandler } from "../lib/http.js";
-import { canManageRound } from "../lib/roundAuth.js";
+import { canManageRound, isCoord } from "../lib/roundAuth.js";
 import { mutationRateLimit } from "../lib/rateLimit.js";
 
 // ─── Auth helpers ─────────────────────────────────────────────────────────────
-
-function isCoord(roles: string[]): boolean {
-  return roles.includes("RoundsCoord") || roles.includes("Admin");
-}
 
 function isAdmin(roles: string[]): boolean {
   return roles.includes("Admin");

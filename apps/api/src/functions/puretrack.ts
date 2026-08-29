@@ -43,6 +43,7 @@ import {
   PURETRACK_STALE_GUARD_MS,
   releasePureTrackGuard,
 } from "../lib/puretrackGuard.js";
+import { isCoord } from "../lib/roundAuth.js";
 import { mutatePureTrackEchoes, setPureTrackStatus } from "../lib/puretrackStatus.js";
 import { parsePureTrackRecord } from "../lib/puretrackRecord.js";
 import { enqueuePureTrackGroupJob } from "../lib/queue.js";
@@ -56,10 +57,6 @@ const DeletePureTrackGroupsBodySchema = z.object({
     "ids must be unique",
   ),
 }).strict();
-
-function isCoord(roles: string[]): boolean {
-  return roles.includes("RoundsCoord") || roles.includes("Admin");
-}
 
 function isAdmin(roles: string[]): boolean {
   return roles.includes("Admin");
