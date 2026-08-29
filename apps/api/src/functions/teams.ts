@@ -35,6 +35,7 @@ import {
   assertCanAccountForSlot,
   assertCanManageRound,
   assertCanRegisterForClub,
+  isCoord,
 } from "../lib/roundAuth.js";
 import { mutationRateLimit } from "../lib/rateLimit.js";
 import { recomputeTeamCaptain } from "../lib/teamCaptain.js";
@@ -42,10 +43,6 @@ import { ensureSeasonClubRecorded, pilotClubIdForSeason } from "../lib/pilotClub
 import { choosePlace } from "./roundRegistration.js";
 
 // ─── Auth helper ──────────────────────────────────────────────────────────────
-
-function isCoord(roles: string[]): boolean {
-  return roles.includes("RoundsCoord") || roles.includes("Admin");
-}
 
 async function loadRound(id: string): Promise<Round> {
   const path = `rounds/${id}.json`;
