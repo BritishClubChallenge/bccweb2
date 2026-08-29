@@ -157,9 +157,9 @@ don't re-read the source.
 - **Accepted cost, written down so it is not "fixed" or rediscovered**: rejected requests
   (403 / 429 / 409) now contend for the round lease, and `withPrivateLease` does NOT retry
   — that's `withPrivateLeaseRetry` — so a lost race escapes as a non-404 non-`HttpError`
-  and the module's catch maps it to `500 INTERNAL`, not a 409. Full reasoning: the Design C
-  section of the issue #274 refactor plan, plus the comment at the `mutationRateLimit` call
-  itself.
+  and the module's catch maps it to `500 INTERNAL`, not a 409. Full reasoning: the comment
+  at the `mutationRateLimit` call itself. Making acquisition retry without re-charging the
+  limiter is [#293](https://github.com/BritishClubChallenge/bccweb2/issues/293).
 - `expectedStatusDetail(from, actual)` — the exact 409 detail string
   (`Expected status X or Y, got Z`), exported so `reopenBrief`'s dryRun preview cannot
   drift from the real path.

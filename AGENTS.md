@@ -352,6 +352,15 @@ Execute saved plans (`.omo/plans/*.md`) in a **dedicated git worktree**, never t
   `npm ci && make build && codegraph init` before editing or typechecking (workspaces
   resolve `@bccweb/*` from `dist/`). After `codegraph init` the codegraph tools work scoped
   to that worktree.
+- A fresh worktree also has **no gitignored local config**. Before `make dev-api` (or any
+  manual QA against a running stack), copy the API host settings in:
+  `cp apps/api/local.settings.json .worktrees/<plan-name>/apps/api/`. Without it `func start`
+  fails with `Can't determine project language from files` / `Worker runtime cannot be 'None'`,
+  which never names the missing file. `.dev-credentials` needs no action — `make dev-api` and
+  `make seed` regenerate it via `seed-admin.mjs --prepare-credentials`.
+- Azurite binds fixed ports (10000/10001/10002), so **one instance serves all worktrees**. If
+  it is already up, run `make dev-api` / `make dev-web` separately rather than `make dev`,
+  which starts its own Azurite and will port-conflict.
 - Do all work inside the worktree; commit only intended source files.
 - After the **user approves the completion gate**, OFFER to run the `pr-flow` skill to open
   the PR and drive CI/Copilot review. Don't merge unless asked. On completion, fast-forward
