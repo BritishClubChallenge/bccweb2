@@ -174,6 +174,36 @@ async function measure(
   }
 }
 
+/**
+ * `measure()` generalised to a write that is not a pure transition: the caller
+ * supplies the method/params/query/body and the exact `roundPath` the read
+ * meter arms on. For create there is no pre-existing round, so the caller
+ * passes the sentinel `"rounds/__create-sentinel__.json"` — nothing ever reads
+ * that path, but arming the meter is what turns the caller counter on.
+ */
+async function measureWrite(
+  user: Pick<User, "id" | "email">,
+  handler: string,
+  init: {
+    method?: string;
+    params?: Record<string, string>;
+    query?: Record<string, string>;
+    body?: unknown;
+  },
+  roundPath: string,
+): Promise<Measured> {
+  meter.reads = 0;
+  meter.callers = 0;
+  meter.roundPath = roundPath;
+  republish.mockClear();
+  try {
+    const res = await invoke(handler, makeAuthRequest(user.id, user.email, init));
+    return { res, reads: meter.reads, callers: meter.callers };
+  } finally {
+    meter.roundPath = null;
+  }
+}
+
 // ─── Criterion 2: one read, one caller resolution ─────────────────────────────
 
 describe("round transitions — per-request work budget (issue 274)", () => {
@@ -236,5 +266,85 @@ describe("round transitions — republish (issue 274)", () => {
     expect((await readPrivateJson<Round>(`rounds/${round.id}.json`))?.status).toBe(
       spec.conflictFrom,
     );
+  });
+});
+
+// ─── createRound (issue 277) ──────────────────────────────────────────────────
+
+describe("round writes - createRound (issue 277)", () => {
+  beforeEach(() => resetAllBuckets());
+
+  it("resolves the caller once", async () => {
+    const seeded = await makeRound();
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res, callers } = await measureWrite(
+      user,
+      "createRound",
+      {
+        method: "POST",
+        body: {
+          date: "2026-06-01",
+          siteId: seeded.site.id,
+          seasonYear: seeded.season.year,
+        },
+      },
+      "rounds/__create-sentinel__.json",
+    );
+
+    expect(res.status).toBe(201);
+    expect(callers).toBeGreaterThanOrEqual(1);
+    expect.soft(callers).toBe(1);
+  });
+
+  it("republishes the created round exactly once", async () => {
+    const seeded = await makeRound();
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res } = await measureWrite(
+      user,
+      "createRound",
+      {
+        method: "POST",
+        body: {
+          date: "2026-06-01",
+          siteId: seeded.site.id,
+          seasonYear: seeded.season.year,
+        },
+      },
+      "rounds/__create-sentinel__.json",
+    );
+
+    expect(res.status).toBe(201);
+    expect(republish).toHaveBeenCalledTimes(1);
+    expect(republish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: (res.jsonBody as Round).id,
+        status: "Proposed",
+      }),
+    );
+  });
+
+  it("does not republish when the status validation 400s", async () => {
+    const seeded = await makeRound();
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res } = await measureWrite(
+      user,
+      "createRound",
+      {
+        method: "POST",
+        body: {
+          date: "2026-06-01",
+          siteId: seeded.site.id,
+          seasonYear: seeded.season.year,
+          status: "Locked",
+        },
+      },
+      "rounds/__create-sentinel__.json",
+    );
+
+    expect(res.status).toBe(400);
+    expect(republish).not.toHaveBeenCalled();
   });
 });

@@ -192,10 +192,8 @@ async function call(
 void bytes;
 void etag;
 void UNAUTHORIZED;
-void FORBIDDEN;
 void SCOPE_FORBIDDEN;
 void NOT_FOUND;
-void GENERIC_500;
 void INVALID_BLOB_PATH;
 
 beforeEach(() => {
@@ -297,5 +295,136 @@ describe("round write executor behaviour (issue 277)", () => {
     expect(limiter).toHaveBeenCalledTimes(1);
     expect(limiter.mock.calls[0]?.[2]).toBe("confirmRound");
     expect(limiter.mock.calls[0]?.[3]).toBe("standard");
+  });
+});
+
+// ─── (e) createRound contract (todo 2) ────────────────────────────────────────
+
+describe("createRound responses (issue 277)", () => {
+  it("unauthenticated -> 401 UNAUTHORIZED", async () => {
+    const seeded = await makeRound();
+    const res = await call("createRound", null, {
+      method: "POST",
+      body: {
+        date: "2026-06-01",
+        siteId: seeded.site.id,
+        seasonYear: seeded.season.year,
+      },
+    });
+    expect(res.status).toBe(401);
+    expect(res.jsonBody).toEqual(UNAUTHORIZED);
+  });
+
+  it("Pilot -> 403 FORBIDDEN", async () => {
+    const seeded = await makeRound();
+    const { user } = await makeUser({ roles: ["Pilot"] });
+    const res = await call("createRound", user, {
+      method: "POST",
+      body: {
+        date: "2026-06-01",
+        siteId: seeded.site.id,
+        seasonYear: seeded.season.year,
+      },
+    });
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toEqual(FORBIDDEN);
+  });
+
+  it("RoundsCoord with no club -> 403 FORBIDDEN with no detail", async () => {
+    const seeded = await makeRound();
+    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: null });
+    const res = await call("createRound", user, {
+      method: "POST",
+      body: {
+        date: "2026-06-01",
+        siteId: seeded.site.id,
+        seasonYear: seeded.season.year,
+      },
+    });
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toEqual(FORBIDDEN);
+  });
+
+  it("RoundsCoord of club A posting organisingClubId B -> 403 FORBIDDEN with no detail", async () => {
+    const seeded = await makeRound();
+    const clubA = randomUUID();
+    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: clubA });
+    const res = await call("createRound", user, {
+      method: "POST",
+      body: {
+        date: "2026-06-01",
+        siteId: seeded.site.id,
+        seasonYear: seeded.season.year,
+        organisingClubId: randomUUID(),
+      },
+    });
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toEqual(FORBIDDEN);
+  });
+
+  it("malformed JSON -> 500 GENERIC_500", async () => {
+    const seeded = await makeRound();
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const req = makeAuthRequest(user.id, user.email, { method: "POST" });
+    req.json = () => Promise.reject(new SyntaxError("Unexpected token"));
+    vi.mocked(mutationRateLimit).mockClear();
+    const res = await invoke("createRound", req);
+    expect(res.status).toBe(500);
+    expect(res.jsonBody).toEqual(GENERIC_500);
+    void seeded;
+  });
+
+  it("Admin posting status: \"Locked\" -> 400 INVALID_STATUS", async () => {
+    const seeded = await makeRound();
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const res = await call("createRound", user, {
+      method: "POST",
+      body: {
+        date: "2026-06-01",
+        siteId: seeded.site.id,
+        seasonYear: seeded.season.year,
+        status: "Locked",
+      },
+    });
+    expect(res.status).toBe(400);
+    expect(res.jsonBody).toEqual({
+      error: "Bad Request",
+      code: "INVALID_STATUS",
+      detail: "Rounds must be created with status Proposed (received Locked)",
+    });
+  });
+
+  it("Admin valid create -> 201 and charges createRound/standard once", async () => {
+    const seeded = await makeRound();
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const res = await call("createRound", user, {
+      method: "POST",
+      body: {
+        date: "2026-06-01",
+        siteId: seeded.site.id,
+        seasonYear: seeded.season.year,
+      },
+    });
+    expect(res.status).toBe(201);
+    const limiter = vi.mocked(mutationRateLimit);
+    expect(limiter).toHaveBeenCalledTimes(1);
+    expect(limiter.mock.calls[0]?.[2]).toBe("createRound");
+    expect(limiter.mock.calls[0]?.[3]).toBe("standard");
+  });
+
+  it("structural: createRound passes the preamble check and contains applyRoundWrite(", () => {
+    const body = handlerSource(ROUNDS_MUTATE_SOURCE, "createRound");
+    expect(body).toContain("applyRoundWrite(");
+    for (const token of PREAMBLE_TOKENS) {
+      expect(body).not.toContain(token);
+    }
+  });
+
+  it("structural: ROUND_WRITES.create equals its row", () => {
+    expect(writes?.["create"]).toEqual({
+      kind: "create",
+      endpoint: "createRound",
+      tier: "standard",
+    });
   });
 });
