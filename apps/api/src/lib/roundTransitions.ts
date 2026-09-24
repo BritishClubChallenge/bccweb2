@@ -26,10 +26,10 @@ import type {
   HttpResponseInit,
   InvocationContext,
 } from "@azure/functions";
-import type { CallerIdentity, Round, RoundStatus } from "@bccweb/types";
-import { RoundSchema } from "@bccweb/schemas";
+import type { CallerIdentity, Round, RoundBrief, RoundStatus } from "@bccweb/types";
+import { BriefSchema, RoundSchema } from "@bccweb/schemas";
 import { getCallerIdentity } from "./auth.js";
-import { getPrivateBlobClient, withPrivateLease } from "./blob.js";
+import { getPrivateBlobClient, withPrivateLease, withRoundAndBriefLease } from "./blob.js";
 import { readJson, writePrivateJson } from "./blobJson.js";
 import { HttpError } from "./http.js";
 import { mutationRateLimit, type MutationRateLimitTier } from "./rateLimit.js";
@@ -39,7 +39,7 @@ import { assertCanManageRound, isCoord } from "./roundAuth.js";
 export type RoundTransitionName = "confirm" | "reopen" | "cancel" | "uncancel";
 
 /** The writes the executor can run; grows beyond the pure four in later todos. */
-export type RoundWriteName = RoundTransitionName | "create" | "update";
+export type RoundWriteName = RoundTransitionName | "create" | "update" | "briefComplete";
 
 interface RoundWriteSpecBase {
   /** Rate-limit bucket key suffix — `mutation:{tier}:{endpoint}`. */
@@ -52,8 +52,8 @@ export interface TransitionWriteSpec extends RoundWriteSpecBase {
   /** Statuses the transition accepts; anything else is a 409. */
   readonly from: readonly RoundStatus[];
   readonly to: RoundStatus;
-  /** Lease strategy; grows to "roundAndBrief" | "pureTrackEchoes" later. */
-  readonly lease: "round";
+  /** Lease strategy; grows to "pureTrackEchoes" later. */
+  readonly lease: "round" | "roundAndBrief";
 }
 
 /**
@@ -111,6 +111,14 @@ export const ROUND_WRITES: Record<RoundWriteName, RoundWriteSpec> = {
     endpoint: "updateRound",
     tier: "standard",
   },
+  briefComplete: {
+    kind: "transition",
+    from: ["Confirmed"],
+    to: "BriefComplete",
+    lease: "roundAndBrief",
+    endpoint: "briefCompleteRound",
+    tier: "standard",
+  },
 };
 
 export const ROUND_TRANSITIONS: Record<RoundTransitionName, RoundTransitionSpec> =
@@ -134,6 +142,13 @@ export interface RoundWriteContext {
   readonly caller: CallerIdentity;
   readonly id: string;
   readonly round: Round;
+  /**
+   * The FRESH, leased brief read — populated ONLY for the `roundAndBrief`
+   * (and later `pureTrackEchoes`) lease strategies, and ONLY on the context
+   * passed to `mutate`. `undefined` for `round`-lease writes and for the
+   * preview path (the preview works on the handler's own pre-read instead).
+   */
+  readonly brief?: RoundBrief;
 }
 
 /**
@@ -370,6 +385,88 @@ async function runRoundWrite<Extra>(
 }
 
 /**
+ * The `roundAndBrief` lease strategy (brief-complete): requireId ->
+ * requireCoordCaller -> readRoundTranslated -> assertCanManageRound -> scope ->
+ * chargeLimiter -> assertFrom -> gate -> [preview returns here] ->
+ * withRoundAndBriefLease{ readJson(round) -> assertFrom -> readJson(brief,
+ * BriefSchema) -> mutate({round, brief}) -> `round.status = spec.to` ->
+ * writePrivateJson(brief, briefLeaseId) -> writePrivateJson(round,
+ * roundLeaseId) } -> translateStorageError -> republish -> respond (200).
+ *
+ * The unleased pre-read is what the preview and the real path share; the real
+ * path then re-reads the round INSIDE the lease and re-runs `assertFrom` —
+ * check-then-act, since the status may have moved between the pre-read and
+ * lease acquisition. `assertCanManageRound`, `scope`, the limiter and `gate`
+ * run ONCE, in the preamble: club membership is not the race the lease
+ * protects against.
+ *
+ * R8 write order (replaces `completeBriefTransaction`, roundsMutate.ts): the
+ * BRIEF is written BEFORE the round so a crashed second write never leaves a
+ * BriefComplete round pointing at an unfrozen brief. Setting `round.status =
+ * spec.to` AFTER `mutate` is safe because `invalidatePriorSignToFlyFlags`
+ * (lib/signTofly/invalidate.ts) never reads `round.status` — it keys purely on
+ * the brief version and slot fields.
+ *
+ * The `mutate` hook receives a context whose `brief` field is the FRESH leased
+ * brief read (a different object from the handler's pre-read — state may have
+ * moved under it), so the freeze/invalidation acts on what is actually
+ * persisted.
+ */
+async function runRoundAndBriefWrite<Extra>(
+  req: HttpRequest,
+  ctx: InvocationContext,
+  spec: TransitionWriteSpec,
+  hooks: RoundWriteHooks<Extra> | undefined
+): Promise<HttpResponseInit> {
+  const id = requireId(req);
+  const caller = await requireCoordCaller(req);
+
+  const path = `rounds/${id}.json`;
+
+  // The shared unleased preamble: pre-read, fine scope, limiter, status gate,
+  // then the write's own gate (brief-complete: the brief must already exist).
+  // No try/catch here — readRoundTranslated self-contains its translation and
+  // hook HttpErrors propagate straight to withErrorHandler.
+  const preRound = await readRoundTranslated(path);
+  assertCanManageRound(caller, preRound);
+  const preContext: RoundWriteContext = { req, ctx, caller, id, round: preRound };
+  if (hooks?.scope) await hooks.scope(preContext);
+  await chargeLimiter(req, caller, spec);
+  assertFrom(spec, preRound);
+  if (hooks?.gate) await hooks.gate(preContext);
+
+  if (req.query.get("dryRun") === "true" && hooks?.preview) {
+    return { status: 200, jsonBody: await hooks.preview(preContext) };
+  }
+
+  let extra: Extra;
+  let written: Round;
+
+  try {
+    const leased = await withRoundAndBriefLease(id, async (roundLeaseId, briefLeaseId) => {
+      const round = await readJson(getPrivateBlobClient(path), RoundSchema, path);
+      assertFrom(spec, round);
+      const briefPath = `round-briefs/${id}.json`;
+      const brief = await readJson(getPrivateBlobClient(briefPath), BriefSchema, briefPath);
+      const c: RoundWriteContext = { req, ctx, caller, id, round, brief };
+      const produced = hooks?.mutate
+        ? await hooks.mutate(c)
+        : (undefined as Extra);
+      round.status = spec.to;
+      await writePrivateJson(briefPath, BriefSchema, brief, briefLeaseId);
+      await writePrivateJson(path, RoundSchema, round, roundLeaseId);
+      return { round, produced };
+    });
+    written = leased.round;
+    extra = leased.produced;
+  } catch (err: unknown) {
+    translateStorageError(err);
+  }
+
+  return republishAndRespond(written, hooks, extra);
+}
+
+/**
  * The `create` write: requireCoordCaller -> scope -> chargeLimiter -> mutate
  * (which builds AND persists the new round, returning it) -> republish ->
  * after -> respond (201). No id guard, no lease and no storage-error
@@ -426,6 +523,14 @@ export function applyRoundWrite<Extra = undefined>(
   const spec = ROUND_WRITES[name];
   if (spec.kind === "create") {
     return runCreateWrite(req, ctx, spec, hooks as CreateHooks);
+  }
+  if (spec.kind === "transition" && spec.lease === "roundAndBrief") {
+    return runRoundAndBriefWrite(
+      req,
+      ctx,
+      spec,
+      hooks as RoundWriteHooks<Extra> | undefined
+    );
   }
   return runRoundWrite(
     req,

@@ -460,13 +460,6 @@ function confirmRound(
 
 // ─── POST /api/rounds/{id}/brief-complete ─────────────────────────────────────
 
-interface CompleteBriefContext {
-  briefTeams: BriefTeamEntry[];
-  callerUserId: string;
-  roundLeaseId: string;
-  briefLeaseId: string;
-}
-
 /**
  * Every Filled round slot must be snapshot-able — i.e. present in
  * buildBriefTeams(round) (which only yields pilots that already carry a
@@ -558,52 +551,6 @@ function freezeBriefAndCountInvalidations(
   return invalidatedSignatureCount;
 }
 
-/**
- * The atomic brief-complete body (R8) — runs as ONE unit under the round+brief
- * leases acquired by withRoundAndBriefLease. It MUST NOT be split into separate
- * transactions. In order:
- *   1. Refresh NON-material derived metadata (teams/date/siteName/club/PureTrack
- *      names) so downstream PDF/email never read stale copies. None of these are
- *      MATERIAL_BRIEF_FIELDS, so the freeze hash is unaffected.
- *   2. Freeze the material hash: the first freeze sets `hash` and keeps
- *      `version`; a material change archives the prior {version, hash, createdAt,
- *      createdBy, supersededAt} onto versionHistory (ALL BriefVersionSchema
- *      required fields), bumps `version`, and sets the new hash.
- *   3. Persist the frozen brief JSON (PDF generation stays OUTSIDE the lease).
- *   4. ALWAYS invalidate prior sign-to-fly flags keyed on the now-current brief
- *      version (retry-safe — NOT gated on whether THIS call bumped), then persist
- *      the flag resets onto the round.
- * Steps 1-2 + the invalidation-count of 4 are delegated to
- * freezeBriefAndCountInvalidations (shared with the dryRun preview); this
- * function adds the persistence (brief-before-round preserves the R8 write order).
- * Returns the number of signatures invalidated by this call.
- */
-async function completeBriefTransaction(
-  round: Round,
-  brief: RoundBrief,
-  signatures: Signature[],
-  ctx: CompleteBriefContext,
-): Promise<number> {
-  const invalidatedSignatureCount = freezeBriefAndCountInvalidations(
-    round,
-    brief,
-    signatures,
-    ctx.briefTeams,
-    ctx.callerUserId,
-  );
-
-  await writePrivateJson(
-    `round-briefs/${round.id}.json`,
-    BriefSchema,
-    brief,
-    ctx.briefLeaseId,
-  );
-
-  await writePrivateJson(`rounds/${round.id}.json`, RoundSchema, round, ctx.roundLeaseId);
-
-  return invalidatedSignatureCount;
-}
-
 /** Slots currently signed (signToFly === true) — the reopen dryRun's at-risk count. */
 function countCurrentlySignedSlots(round: Round): number {
   let count = 0;
@@ -619,105 +566,58 @@ function countCurrentlySignedSlots(round: Round): number {
  * POST /api/rounds/{id}/brief-complete — Confirmed → BriefComplete.
  *
  * The Confirmed→BriefComplete transition that FREEZES the brief and invalidates
- * stale sign-to-fly flags. The freeze body runs UNDER the round lease with the
- * brief lease NESTED (B3) via withRoundAndBriefLease so the brief write is
- * covered atomically.
+ * stale sign-to-fly flags, run by the `roundAndBrief` lease strategy in
+ * lib/roundTransitions.ts (the R8 brief-before-round write order lives there).
  *
  * G2 (BLOCKING): the brief MUST already exist — this safety path never
- * lazy-creates one (and you cannot lease a missing blob). Aborts 409 if the
- * brief is absent (`BRIEF_REQUIRED`) or the roster is incomplete (a Filled slot
- * is not snapshot-able). Responds with the round plus `invalidatedSignatureCount`.
+ * lazy-creates one (and you cannot lease a missing blob). The `gate` hook
+ * aborts 409 `BRIEF_REQUIRED` if the brief is absent; `assertRosterComplete`
+ * aborts 409 if a Filled slot is not snapshot-able. Responds with the round
+ * plus `invalidatedSignatureCount`.
  */
-async function briefCompleteRound(
+function briefCompleteRound(
   req: HttpRequest,
-  _ctx: InvocationContext
+  ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  const id = req.params["id"];
-  if (!id) throw new HttpError(400, "MISSING_ROUND_ID", "Missing round id");
+  // Per-invocation closure state: gate() sets preBrief, preview() reads it.
+  // Function-scoped — NEVER module scope (see createRound above).
+  let preBrief!: RoundBrief;
 
-  const dryRun = req.query.get("dryRun") === "true";
-
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
-  await assertManageableRound(caller, id);
-  await mutationRateLimit(req, caller, "briefCompleteRound", "standard");
-
-  const roundPath = `rounds/${id}.json`;
-
-  // G2: brief must exist before the lease — withRoundAndBriefLease cannot lease
-  // a missing brief blob, and this safety path never lazy-creates one.
-  let preRound: Round;
-  try {
-    preRound = await readJson(getPrivateBlobClient(roundPath), RoundSchema, roundPath);
-  } catch (err: unknown) {
-    if ((err as { statusCode?: number }).statusCode === 404) {
-      throw new HttpError(404, "NOT_FOUND", "Round not found");
-    }
-    throw new HttpError(500, "INTERNAL");
-  }
-  if (preRound.status !== "Confirmed") {
-    throw new HttpError(409, "CONFLICT", `Expected status Confirmed, got ${preRound.status}`);
-  }
-  const preBrief = await readExistingBriefForLock(id);
-  if (!preBrief) {
-    throw new HttpError(409, "BRIEF_REQUIRED", "A brief must exist before brief-complete");
-  }
-
-  // dryRun preview: same preconditions, but compute the count on CLONES so
-  // nothing persists (freezeBriefAndCountInvalidations MUTATES its args). Powers
-  // the RoundManage confirm modal without transitioning on modal-open.
-  if (dryRun) {
-    const briefTeams = await buildBriefTeams(preRound);
-    assertRosterComplete(preRound, briefTeams);
-    const signatures = await listSignaturesForRound(id);
-    const invalidatedSignatureCount = freezeBriefAndCountInvalidations(
-      structuredClone(preRound),
-      structuredClone(preBrief),
-      signatures,
-      briefTeams,
-      caller.userId,
-    );
-    return { status: 200, jsonBody: { invalidatedSignatureCount } };
-  }
-
-  let updatedRound: Round;
-  let invalidatedSignatureCount: number;
-  try {
-    const result = await withRoundAndBriefLease(id, async (roundLeaseId, briefLeaseId) => {
-      const r = await readJson(getPrivateBlobClient(roundPath), RoundSchema, roundPath);
-      if (r.status !== "Confirmed") {
-        throw new HttpError(409, "CONFLICT", `Expected status Confirmed, got ${r.status}`);
+  return applyRoundWrite(req, ctx, "briefComplete", {
+    gate: async ({ id }) => {
+      const brief = await readExistingBriefForLock(id);
+      if (!brief) {
+        throw new HttpError(409, "BRIEF_REQUIRED", "A brief must exist before brief-complete");
       }
-      const briefPath = `round-briefs/${id}.json`;
-      const brief = await readJson(getPrivateBlobClient(briefPath), BriefSchema, briefPath);
-
-      // Roster completeness BEFORE any write — every Filled slot must be
-      // snapshot-able so pilots can be safely frozen before signing.
-      const briefTeams = await buildBriefTeams(r);
-      assertRosterComplete(r, briefTeams);
-
-      r.status = "BriefComplete";
-      const signatures = await listSignaturesForRound(id);
-      const count = await completeBriefTransaction(r, brief, signatures, {
+      preBrief = brief;
+    },
+    preview: async (c) => {
+      const briefTeams = await buildBriefTeams(c.round);
+      assertRosterComplete(c.round, briefTeams);
+      const signatures = await listSignaturesForRound(c.id);
+      const invalidatedSignatureCount = freezeBriefAndCountInvalidations(
+        structuredClone(c.round),
+        structuredClone(preBrief),
+        signatures,
         briefTeams,
-        callerUserId: caller.userId,
-        roundLeaseId,
-        briefLeaseId,
-      });
-      return { round: r, count };
-    });
-    updatedRound = result.round;
-    invalidatedSignatureCount = result.count;
-  } catch (err: unknown) {
-    if (err instanceof HttpError) throw err;
-    const e = err as { statusCode?: number };
-    if (e.statusCode === 404) throw new HttpError(404, "NOT_FOUND", "Round not found");
-    throw new HttpError(500, "INTERNAL");
-  }
-
-  await updateRoundsIndex(updatedRound);
-  return { status: 200, jsonBody: { ...updatedRound, invalidatedSignatureCount } };
+        c.caller.userId,
+      );
+      return { invalidatedSignatureCount };
+    },
+    mutate: async (c) => {
+      const briefTeams = await buildBriefTeams(c.round);
+      assertRosterComplete(c.round, briefTeams);
+      const signatures = await listSignaturesForRound(c.id);
+      return freezeBriefAndCountInvalidations(
+        c.round,
+        c.brief!,
+        signatures,
+        briefTeams,
+        c.caller.userId,
+      );
+    },
+    respond: (round, count) => ({ ...round, invalidatedSignatureCount: count }),
+  });
 }
 
 // ─── POST /api/rounds/{id}/reopen ─────────────────────────────────────────────
