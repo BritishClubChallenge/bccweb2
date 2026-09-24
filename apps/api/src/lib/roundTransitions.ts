@@ -139,8 +139,10 @@ export const ROUND_TRANSITIONS: Record<RoundTransitionName, RoundTransitionSpec>
   PURE_TRANSITIONS;
 
 /**
- * The exact 409 detail. Exported so reopenBrief's dryRun preview cannot drift
- * from the real path.
+ * The exact 409 detail. Its only call site is `assertFrom`, shared by every
+ * transition write's preview and real path, so the two cannot drift. Stays
+ * exported because `briefCompleteDryRun.test.ts` imports it directly for test
+ * assertions.
  */
 export function expectedStatusDetail(
   from: readonly RoundStatus[],
