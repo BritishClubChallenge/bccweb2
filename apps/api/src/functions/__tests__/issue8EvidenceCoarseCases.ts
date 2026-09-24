@@ -14,15 +14,6 @@ export const COARSE_SELF_CASES: readonly CallSiteCase[] = [
   { file: "flights.ts", handler: "deleteFlight", endpoint: "deleteFlight", tier: "flights", forbiddenKind: "coord-coarse", setup: coordCoarse("DELETE", { id: randomUUID(), flightId: randomUUID() }) },
   { file: "pilots.ts", handler: "updatePilot", endpoint: "updatePilot", tier: "standard", forbiddenKind: "self-or-admin", setup: async () => ({ forbidden: await seedEvidenceUser({ roles: ["Pilot"], pilotId: randomUUID() }), request: { method: "PUT", params: { id: randomUUID() }, body: { firstName: "Nope" } } }) },
   { file: "roundsMutate.ts", handler: "briefCompleteRound", endpoint: "briefCompleteRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
-  // reopenBrief gates TWICE, once per path: ?dryRun=true takes the preview
-  // branch's own literal call site in roundsMutate.ts (below), and the real
-  // transition takes lib/roundTransitions.ts's table-driven one. Only the
-  // preview belongs here. The preview's scope check runs before its limiter and
-  // outside any lease, so a coarse caller is the whole story; the four table
-  // transitions gate inside the lease and are covered as coord-SCOPE rows in
-  // issue8EvidenceScopedCases.ts, which is the only shape that exercises that
-  // ordering.
-  { file: "roundsMutate.ts", handler: "reopenBrief", endpoint: "reopenBrief", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }, {}, { dryRun: "true" }) },
   { file: "roundsMutate.ts", handler: "lockRound", endpoint: "lockRound", tier: "heavy", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
   { file: "roundsMutate.ts", handler: "unlockRound", endpoint: "unlockRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
   { file: "roundsMutate.ts", handler: "completeRound", endpoint: "completeRound", tier: "heavy", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },

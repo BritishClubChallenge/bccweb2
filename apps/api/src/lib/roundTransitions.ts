@@ -147,12 +147,17 @@ export interface RoundWriteContext {
  *   rethrows it as-is.
  * - `gate`: 409-class checks, run after the limiter and after the transition
  *   from-gate.
+ * - `preview`: honoured only when `req.query.get("dryRun") === "true"`. Runs
+ *   on an UNLEASED pre-read (readRoundTranslated -> assertCanManageRound ->
+ *   scope -> chargeLimiter -> assertFrom -> gate), returns the 200 body
+ *   verbatim, and never persists or republishes.
  * - `mutate`: in-memory changes under the lease; returns `Extra`.
  * - `respond`: shapes the success body; defaults to the round.
  */
 export interface RoundWriteHooks<Extra = undefined> {
   readonly scope?: (c: RoundWriteContext) => void | Promise<void>;
   readonly gate?: (c: RoundWriteContext) => void | Promise<void>;
+  readonly preview?: (c: RoundWriteContext) => unknown;
   readonly mutate?: (c: RoundWriteContext) => Extra | Promise<Extra>;
   readonly respond?: (round: Round, extra: Extra) => unknown;
 }
@@ -221,6 +226,15 @@ function translateStorageError(err: unknown): never {
   throw new HttpError(500, "INTERNAL");
 }
 
+/** Unleased read for the preview path, translated the same way a leased read is. */
+async function readRoundTranslated(path: string): Promise<Round> {
+  try {
+    return await readJson(getPrivateBlobClient(path), RoundSchema, path);
+  } catch (err: unknown) {
+    translateStorageError(err);
+  }
+}
+
 async function chargeLimiter(
   req: HttpRequest,
   caller: CallerIdentity,
@@ -274,12 +288,23 @@ async function republishAndRespond<Extra>(
 }
 
 /**
- * The `round` lease strategy: requireId -> requireCoordCaller, then under the
- * round lease readJson -> assertCanManageRound -> scope (untranslated) ->
- * chargeLimiter -> [transition only: assertFrom] -> gate -> mutate ->
- * [transition only: `round.status = spec.to`] -> writePrivateJson(round);
- * translateStorageError on the way out, then republish and respond (200). The
- * caller is resolved and the round read each exactly once.
+ * The `round` lease strategy: requireId -> requireCoordCaller, then one of two
+ * paths:
+ *
+ * - Preview (only when `?dryRun=true` AND the write supplies a `preview`
+ *   hook): readRoundTranslated -> assertCanManageRound -> scope ->
+ *   chargeLimiter -> assertFrom (transitions only) -> gate -> preview (200).
+ *   Unleased, never persists, never republishes. The scope hook is NOT wrapped
+ *   in `UntranslatedHookError` here: this branch never enters the lease's
+ *   try/catch, so an `HttpError` already propagates as-is and anything else
+ *   falls to withErrorHandler's generic catch-all — wrapping would change
+ *   nothing.
+ * - Otherwise: withPrivateLease{ readJson -> assertCanManageRound -> scope
+ *   (untranslated) -> chargeLimiter -> [transition only: assertFrom] -> gate
+ *   -> mutate -> [transition only: `round.status = spec.to`] ->
+ *   writePrivateJson(round) } -> translateStorageError -> republish ->
+ *   respond (200). The caller is resolved and the round read each exactly
+ *   once.
  */
 async function runRoundWrite<Extra>(
   req: HttpRequest,
@@ -291,6 +316,18 @@ async function runRoundWrite<Extra>(
   const caller = await requireCoordCaller(req);
 
   const path = `rounds/${id}.json`;
+
+  if (req.query.get("dryRun") === "true" && hooks?.preview) {
+    const round = await readRoundTranslated(path);
+    assertCanManageRound(caller, round);
+    const c: RoundWriteContext = { req, ctx, caller, id, round };
+    if (hooks.scope) await hooks.scope(c);
+    await chargeLimiter(req, caller, spec);
+    if (spec.kind === "transition") assertFrom(spec, round);
+    if (hooks.gate) await hooks.gate(c);
+    return { status: 200, jsonBody: await hooks.preview(c) };
+  }
+
   let extra: Extra;
   let written: Round;
 

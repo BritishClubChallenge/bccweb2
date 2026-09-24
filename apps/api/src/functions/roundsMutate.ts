@@ -69,11 +69,7 @@ import {
 } from "../lib/auth.js";
 import { HttpError, withErrorHandler } from "../lib/http.js";
 import { assertCanManageRound, isCoord } from "../lib/roundAuth.js";
-import {
-  applyRoundWrite,
-  expectedStatusDetail,
-  ROUND_TRANSITIONS,
-} from "../lib/roundTransitions.js";
+import { applyRoundWrite } from "../lib/roundTransitions.js";
 import { mutationRateLimit } from "../lib/rateLimit.js";
 import { updateRoundsIndex, recomputeSeason } from "../lib/recompute.js";
 import { setBriefPdfStatus } from "../lib/briefPdf.js";
@@ -735,54 +731,14 @@ async function briefCompleteRound(
  * version bump). The response mirrors brief-complete by carrying
  * `invalidatedSignatureCount` (always 0 — reopen invalidates nothing).
  */
-async function reopenBrief(
+function reopenBrief(
   req: HttpRequest,
-  _ctx: InvocationContext
+  ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  const id = req.params["id"];
-  if (!id) throw new HttpError(400, "MISSING_ROUND_ID", "Missing round id");
-
-  const dryRun = req.query.get("dryRun") === "true";
-
-  // dryRun preview: validate BriefComplete (409 otherwise, matching the real
-  // transition) and report how many currently-signed slots the reopen puts at
-  // risk, WITHOUT changing status. Powers the RoundManage confirm modal.
-  //
-  // It carries its OWN auth preamble because it never reaches
-  // applyRoundTransition. Keeping the preamble here rather than above the
-  // branch is what stops the real path charging the reopenBrief bucket twice
-  // (30/min would become 15/min) — each path charges exactly one token.
-  if (dryRun) {
-    const caller = await getCallerIdentity(req);
-    if (!caller) return unauthorizedResponse();
-    if (!isCoord(caller.roles)) return forbiddenResponse();
-    await assertManageableRound(caller, id);
-    await mutationRateLimit(req, caller, "reopenBrief", "standard");
-
-    const path = `rounds/${id}.json`;
-    let round: Round;
-    try {
-      round = await readJson(getPrivateBlobClient(path), RoundSchema, path);
-    } catch (err: unknown) {
-      if ((err as { statusCode?: number }).statusCode === 404) {
-        throw new HttpError(404, "NOT_FOUND", "Round not found");
-      }
-      throw new HttpError(500, "INTERNAL");
-    }
-    if (!ROUND_TRANSITIONS.reopen.from.includes(round.status)) {
-      throw new HttpError(
-        409,
-        "CONFLICT",
-        expectedStatusDetail(ROUND_TRANSITIONS.reopen.from, round.status),
-      );
-    }
-    return {
-      status: 200,
-      jsonBody: { invalidatedSignatureCount: countCurrentlySignedSlots(round) },
-    };
-  }
-
-  return applyRoundWrite(req, _ctx, "reopen", {
+  return applyRoundWrite(req, ctx, "reopen", {
+    preview: ({ round }) => ({
+      invalidatedSignatureCount: countCurrentlySignedSlots(round),
+    }),
     respond: (round) => ({ ...round, invalidatedSignatureCount: 0 }),
   });
 }
