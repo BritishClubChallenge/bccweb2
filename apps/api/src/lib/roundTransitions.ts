@@ -1,22 +1,32 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
 /**
- * The four PURE round status transitions — confirm / reopen / cancel /
- * uncancel (issue #274).
+ * The round write TABLE and its EXECUTOR (issues #274 / #277).
  *
- * "Pure" means the whole mutation is `round.status = to`: no snapshotting, no
- * scoring, no brief work. Everything that distinguishes one from another is
- * DATA (`ROUND_TRANSITIONS`), so a new transition is a table row, not a fifth
- * copy of the same 20 lines. Handlers that do extra work — brief-complete,
- * lock, unlock, complete — deliberately stay in `functions/roundsMutate.ts`.
+ * `ROUND_WRITES` is the state machine for the round writes routed here: each
+ * row declares the transition's `from`/`to`, the `lease` strategy, and the
+ * rate-limit `endpoint`/`tier`, so a converted handler in
+ * `functions/roundsMutate.ts` is a one-liner over `applyRoundWrite`. The shared
+ * pieces — id guard, caller preamble, fine scope check, limiter, storage-error
+ * translation and the public-index republish — each exist exactly once below.
  *
- * Ordering: `applyRoundTransition` reads `rounds/{id}.json` ONCE and resolves
- * the caller ONCE, which is why `mutationRateLimit` runs INSIDE the lease. See
- * the comment at the call itself before moving it.
+ * Todo 1 of #277 covers the four PURE status transitions (confirm / reopen /
+ * cancel / uncancel): the whole mutation is `round.status = to`. Writes that do
+ * more (create, update, brief-complete, unlock) join the table in later todos;
+ * `lockRound`/`completeRound` remain bespoke in `functions/roundsMutate.ts`
+ * (#275 / #276).
+ *
+ * Ordering: `applyRoundWrite` reads `rounds/{id}.json` ONCE and resolves the
+ * caller ONCE, which is why `mutationRateLimit` runs INSIDE the lease. See the
+ * comment at `chargeLimiter` before moving it.
  */
 
-import type { HttpRequest } from "@azure/functions";
-import type { Round, RoundStatus } from "@bccweb/types";
+import type {
+  HttpRequest,
+  HttpResponseInit,
+  InvocationContext,
+} from "@azure/functions";
+import type { CallerIdentity, Round, RoundStatus } from "@bccweb/types";
 import { RoundSchema } from "@bccweb/schemas";
 import { getCallerIdentity } from "./auth.js";
 import { getPrivateBlobClient, withPrivateLease } from "./blob.js";
@@ -26,35 +36,58 @@ import { mutationRateLimit, type MutationRateLimitTier } from "./rateLimit.js";
 import { updateRoundsIndex } from "./recompute.js";
 import { assertCanManageRound, isCoord } from "./roundAuth.js";
 
-export interface RoundTransitionSpec {
-  /** Statuses the transition accepts; anything else is a 409. */
-  readonly from: readonly RoundStatus[];
-  readonly to: RoundStatus;
+export type RoundTransitionName = "confirm" | "reopen" | "cancel" | "uncancel";
+
+/** The writes the executor can run; grows beyond the pure four in later todos. */
+export type RoundWriteName = RoundTransitionName;
+
+interface RoundWriteSpecBase {
   /** Rate-limit bucket key suffix — `mutation:{tier}:{endpoint}`. */
   readonly endpoint: string;
   readonly tier: MutationRateLimitTier;
 }
 
-export type RoundTransitionName = "confirm" | "reopen" | "cancel" | "uncancel";
+export interface TransitionWriteSpec extends RoundWriteSpecBase {
+  readonly kind: "transition";
+  /** Statuses the transition accepts; anything else is a 409. */
+  readonly from: readonly RoundStatus[];
+  readonly to: RoundStatus;
+  /** Lease strategy; grows to "roundAndBrief" | "pureTrackEchoes" later. */
+  readonly lease: "round";
+}
+
+/** Grows a union with EditWriteSpec/CreateWriteSpec in later todos. */
+export type RoundWriteSpec = TransitionWriteSpec;
+
+/** Kept exported for the importers that predate ROUND_WRITES. */
+export type RoundTransitionSpec = TransitionWriteSpec;
 
 /**
- * The transition matrix. `apps/api/src/functions/__tests__/issue8EvidenceHarness.ts`
+ * The four pure rows, shared by `ROUND_WRITES` (the executor's table) and
+ * `ROUND_TRANSITIONS` (the legacy export). One object per row so the two can
+ * never drift.
+ */
+const PURE_TRANSITIONS: Record<RoundTransitionName, TransitionWriteSpec> = {
+  confirm: { kind: "transition", from: ["Proposed"], to: "Confirmed", lease: "round", endpoint: "confirmRound", tier: "standard" },
+  reopen: { kind: "transition", from: ["BriefComplete"], to: "Confirmed", lease: "round", endpoint: "reopenBrief", tier: "standard" },
+  cancel: { kind: "transition", from: ["Proposed", "Confirmed"], to: "Cancelled", lease: "round", endpoint: "cancelRound", tier: "standard" },
+  uncancel: { kind: "transition", from: ["Cancelled"], to: "Proposed", lease: "round", endpoint: "uncancelRound", tier: "standard" },
+};
+
+/**
+ * The write table. `apps/api/src/functions/__tests__/issue8EvidenceHarness.ts`
  * derives its rate-limit evidence rows from this table rather than re-listing
  * them, so `endpoint`/`tier` here ARE the audited call sites.
  *
- * Do NOT write `as const satisfies Record<string, RoundTransitionSpec>`: `as
+ * Do NOT write `as const satisfies Record<string, RoundWriteSpec>`: `as
  * const` narrows `from` to e.g. `readonly ["Proposed"]`, and
  * `spec.from.includes(round.status)` below then fails to compile (TS2345).
  */
-export const ROUND_TRANSITIONS: Record<
-  RoundTransitionName,
-  RoundTransitionSpec
-> = {
-  confirm: { from: ["Proposed"], to: "Confirmed", endpoint: "confirmRound", tier: "standard" },
-  reopen: { from: ["BriefComplete"], to: "Confirmed", endpoint: "reopenBrief", tier: "standard" },
-  cancel: { from: ["Proposed", "Confirmed"], to: "Cancelled", endpoint: "cancelRound", tier: "standard" },
-  uncancel: { from: ["Cancelled"], to: "Proposed", endpoint: "uncancelRound", tier: "standard" },
-};
+export const ROUND_WRITES: Record<RoundWriteName, RoundWriteSpec> =
+  PURE_TRANSITIONS;
+
+export const ROUND_TRANSITIONS: Record<RoundTransitionName, RoundTransitionSpec> =
+  PURE_TRANSITIONS;
 
 /**
  * The exact 409 detail. Exported so reopenBrief's dryRun preview cannot drift
@@ -67,33 +100,146 @@ export function expectedStatusDetail(
   return `Expected status ${from.join(" or ")}, got ${actual}`;
 }
 
-/**
- * Run one table-driven transition end to end: auth, scope, rate limit, status
- * gate, leased write, and the public-index republish. Returns the updated
- * round; every rejection is a thrown `HttpError`, so callers just wrap the
- * result in a 200.
- *
- * Response codes, in the order they can fire: 400 (no id) → 401 → 403 (coarse
- * role) → 404 (no such round) → 403 (wrong club) → 429 → 409 (wrong status).
- */
-export async function applyRoundTransition(
-  req: HttpRequest,
-  name: RoundTransitionName
-): Promise<Round> {
-  const spec = ROUND_TRANSITIONS[name];
+/** Everything a hook needs: the request-scoped values plus the leased round. */
+export interface RoundWriteContext {
+  readonly req: HttpRequest;
+  readonly ctx: InvocationContext;
+  readonly caller: CallerIdentity;
+  readonly id: string;
+  readonly round: Round;
+}
 
+/**
+ * Per-write behaviour that stays beside the handler. Every hook is optional;
+ * the executor supplies the no-ops/defaults. Hooks that never `await` are
+ * plain (non-async) functions (`@typescript-eslint/require-await` is on).
+ *
+ * - `scope`: 403/400-class checks needing the round or the body. Runs after
+ *   `assertCanManageRound` and BEFORE the limiter. Inside the lease a
+ *   non-`HttpError` throw is wrapped in `UntranslatedHookError` so translation
+ *   rethrows it as-is.
+ * - `gate`: 409-class checks, run after the limiter and after the transition
+ *   from-gate.
+ * - `mutate`: in-memory changes under the lease; returns `Extra`.
+ * - `respond`: shapes the success body; defaults to the round.
+ */
+export interface RoundWriteHooks<Extra = undefined> {
+  readonly scope?: (c: RoundWriteContext) => void | Promise<void>;
+  readonly gate?: (c: RoundWriteContext) => void | Promise<void>;
+  readonly mutate?: (c: RoundWriteContext) => Extra | Promise<Extra>;
+  readonly respond?: (round: Round, extra: Extra) => unknown;
+}
+
+/**
+ * Wraps a non-`HttpError` thrown by a hook inside the lease so the translation
+ * layer can unwrap and rethrow the ORIGINAL error — scope failures must not be
+ * remapped to `500 INTERNAL` as if they were storage errors.
+ */
+class UntranslatedHookError extends Error {
+  constructor(readonly cause: unknown) {
+    super("untranslated hook error");
+  }
+}
+
+/** The id guard: a missing route param is a 400 before any auth or blob work. */
+function requireId(req: HttpRequest): string {
   const id = req.params["id"];
   if (!id) throw new HttpError(400, "MISSING_ROUND_ID", "Missing round id");
+  return id;
+}
 
+/**
+ * The caller preamble: 401, then the coarse role 403. `withErrorHandler`
+ * (http.ts:91-101) discards the returned `error` string, so these thrown
+ * errors normalise byte-identically to `unauthorizedResponse()` /
+ * `forbiddenResponse(msg)`.
+ */
+async function requireCoordCaller(req: HttpRequest): Promise<CallerIdentity> {
   const caller = await getCallerIdentity(req);
   if (!caller) throw new HttpError(401, "UNAUTHORIZED");
   if (!isCoord(caller.roles)) throw new HttpError(403, "FORBIDDEN");
+  return caller;
+}
+
+/** Map a lease-scoped failure to the response error: 404, else generic 500. */
+function translateStorageError(err: unknown): never {
+  if (err instanceof HttpError) throw err;
+  if (err instanceof UntranslatedHookError) throw err.cause;
+  const e = err as { statusCode?: number };
+  if (e.statusCode === 404) throw new HttpError(404, "NOT_FOUND", "Round not found");
+  throw new HttpError(500, "INTERNAL");
+}
+
+async function chargeLimiter(
+  req: HttpRequest,
+  caller: CallerIdentity,
+  spec: RoundWriteSpec
+): Promise<void> {
+  // DELIBERATELY INSIDE THE LEASE — do not hoist this into the handler.
+  // rateLimit.ts:138-164 requires the scope check to resolve BEFORE the
+  // limiter ("a forbidden caller must get 403, never 429"), and the scope
+  // check needs the round. Reading the round once means the scope check
+  // happens under the lease, so the limiter must follow it here. This is
+  // safe because withLeaseOnClient releases in a `finally` (blob.ts:319-331),
+  // so the 429/409 thrown below still frees the lease. The limiter itself is
+  // a synchronous in-memory token bucket (rateLimit.ts:166-179) and issues
+  // no I/O, so it does not extend the hold in any measurable way.
+  await mutationRateLimit(req, caller, spec.endpoint, spec.tier);
+}
+
+/** The 409 status gate for transitions. */
+function assertFrom(spec: TransitionWriteSpec, round: Round): void {
+  if (!spec.from.includes(round.status)) {
+    throw new HttpError(
+      409,
+      "CONFLICT",
+      expectedStatusDetail(spec.from, round.status)
+    );
+  }
+}
+
+/**
+ * Republish-and-respond. Outside the lease AND outside every try/catch: a
+ * failing republish must fall through withErrorHandler's generic catch
+ * (http.ts:130-137) exactly as it does today, not be remapped to
+ * HttpError(500, "INTERNAL") by the translation — the two produce different
+ * response bodies.
+ */
+async function republishAndRespond<Extra>(
+  round: Round,
+  hooks: RoundWriteHooks<Extra> | undefined,
+  extra: Extra
+): Promise<HttpResponseInit> {
+  await updateRoundsIndex(round);
+  return {
+    status: 200,
+    jsonBody: hooks?.respond ? hooks.respond(round, extra) : round,
+  };
+}
+
+/**
+ * The `round` lease strategy: requireId -> requireCoordCaller, then under the
+ * round lease readJson -> assertCanManageRound -> scope (untranslated) ->
+ * chargeLimiter -> assertFrom -> gate -> mutate -> `round.status = spec.to` ->
+ * writePrivateJson(round); translateStorageError on the way out, then
+ * republish and respond (200). The caller is resolved and the round read each
+ * exactly once.
+ */
+async function runRoundWrite<Extra>(
+  req: HttpRequest,
+  ctx: InvocationContext,
+  spec: RoundWriteSpec,
+  hooks: RoundWriteHooks<Extra> | undefined
+): Promise<HttpResponseInit> {
+  const id = requireId(req);
+  const caller = await requireCoordCaller(req);
 
   const path = `rounds/${id}.json`;
-  let updated: Round;
+  let extra: Extra;
+  let written: Round;
 
   try {
-    updated = await withPrivateLease(path, async (leaseId) => {
+    const leased = await withPrivateLease(path, async (leaseId) => {
       // The ONLY read of the round in this request. A 404 here is impossible:
       // acquireLease (blob.ts:306-313) already ran and threw for a missing
       // blob, and the catch below maps it.
@@ -102,40 +248,46 @@ export async function applyRoundTransition(
       // Fine-grained scope, 403 — step 3 of rateLimit.ts:138-164.
       assertCanManageRound(caller, round);
 
-      // DELIBERATELY INSIDE THE LEASE — do not hoist this into the handler.
-      // rateLimit.ts:138-164 requires the scope check to resolve BEFORE the
-      // limiter ("a forbidden caller must get 403, never 429"), and the scope
-      // check needs the round. Reading the round once means the scope check
-      // happens under the lease, so the limiter must follow it here. This is
-      // safe because withLeaseOnClient releases in a `finally` (blob.ts:319-331),
-      // so the 429/409 thrown below still frees the lease. The limiter itself is
-      // a synchronous in-memory token bucket (rateLimit.ts:166-179) and issues
-      // no I/O, so it does not extend the hold in any measurable way.
-      await mutationRateLimit(req, caller, spec.endpoint, spec.tier);
-
-      if (!spec.from.includes(round.status)) {
-        throw new HttpError(
-          409,
-          "CONFLICT",
-          expectedStatusDetail(spec.from, round.status)
-        );
+      const c: RoundWriteContext = { req, ctx, caller, id, round };
+      if (hooks?.scope) {
+        try {
+          await hooks.scope(c);
+        } catch (err: unknown) {
+          throw err instanceof HttpError ? err : new UntranslatedHookError(err);
+        }
       }
-
+      await chargeLimiter(req, caller, spec);
+      assertFrom(spec, round);
+      if (hooks?.gate) await hooks.gate(c);
+      const produced = hooks?.mutate
+        ? await hooks.mutate(c)
+        : (undefined as Extra);
       round.status = spec.to;
       await writePrivateJson(path, RoundSchema, round, leaseId);
-      return round;
+      return { round, produced };
     });
+    written = leased.round;
+    extra = leased.produced;
   } catch (err: unknown) {
-    if (err instanceof HttpError) throw err;
-    const e = err as { statusCode?: number };
-    if (e.statusCode === 404) throw new HttpError(404, "NOT_FOUND", "Round not found");
-    throw new HttpError(500, "INTERNAL");
+    translateStorageError(err);
   }
 
-  // Outside the lease AND outside the try: a failing republish must fall
-  // through withErrorHandler's generic catch (http.ts:130-137) exactly as it
-  // does today, not be remapped to HttpError(500, "INTERNAL") by the catch
-  // above — the two produce different response bodies.
-  await updateRoundsIndex(updated);
-  return updated;
+  return republishAndRespond(written, hooks, extra);
+}
+
+/**
+ * Run one table-driven round write end to end: auth, scope, rate limit,
+ * status gate, leased write, and the public-index republish. Returns the
+ * 200 response; every rejection is a thrown `HttpError`.
+ *
+ * Response codes, in the order they can fire: 400 (no id) → 401 → 403 (coarse
+ * role) → 404 (no such round) → 403 (wrong club) → 429 → 409 (wrong status).
+ */
+export function applyRoundWrite<Extra = undefined>(
+  req: HttpRequest,
+  ctx: InvocationContext,
+  name: RoundWriteName,
+  hooks?: RoundWriteHooks<Extra>
+): Promise<HttpResponseInit> {
+  return runRoundWrite(req, ctx, ROUND_WRITES[name], hooks);
 }

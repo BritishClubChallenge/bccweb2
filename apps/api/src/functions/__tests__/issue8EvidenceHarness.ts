@@ -15,7 +15,7 @@ import {
   mutationRateLimit,
   type MutationRateLimitTier,
 } from "../../lib/rateLimit.js";
-import { ROUND_TRANSITIONS } from "../../lib/roundTransitions.js";
+import { ROUND_WRITES } from "../../lib/roundTransitions.js";
 import { EvidenceHttpRequest } from "./issue8EvidenceRequest.js";
 
 /** Handler modules scanned for LITERAL mutationRateLimit call sites. */
@@ -207,7 +207,7 @@ export async function crossClubCoord(): Promise<TestUser> {
  * Two scanners, because there are two shapes of call site:
  * 1. handler modules pass string LITERALS, so the regex reads them directly;
  * 2. lib/roundTransitions.ts passes `spec.endpoint` / `spec.tier` from
- *    ROUND_TRANSITIONS, which no regex can resolve — so the source scan only
+ *    ROUND_WRITES, which no regex can resolve — so the source scan only
  *    proves the gate is still THERE, and the rows are derived from the table
  *    itself. Deriving beats re-listing: the evidence cannot drift from the
  *    table, and deleting the gate empties the rows rather than silently
@@ -233,7 +233,7 @@ export async function sourceMutationCallSites(
     const source = await fs.readFile(path.join(libraryDirectory, file), "utf8");
     const gates = source.match(tablePattern)?.length ?? 0;
     for (let gate = 0; gate < gates; gate += 1) {
-      for (const spec of Object.values(ROUND_TRANSITIONS)) {
+      for (const spec of Object.values(ROUND_WRITES)) {
         rows.push({ file, endpoint: spec.endpoint, tier: spec.tier });
       }
     }

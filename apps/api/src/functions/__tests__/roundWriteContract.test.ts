@@ -159,7 +159,7 @@ async function bytes(path: string): Promise<Buffer> {
   return getPrivateContainer().getBlobClient(path).downloadToBuffer();
 }
 
-async function etag(path: string): Promise<string> {
+async function etag(path: string): Promise<string | undefined> {
   return (await getPrivateContainer().getBlobClient(path).getProperties())
     .etag;
 }

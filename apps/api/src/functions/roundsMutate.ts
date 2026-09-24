@@ -15,9 +15,9 @@
  * POST   /api/rounds/{id}/complete         — Locked → Complete + score + recompute
  *
  * The four PURE status transitions (confirm, reopen, cancel, uncancel) are
- * table-driven and live in lib/roundTransitions.ts; the handlers below are
- * one-liners over `applyRoundTransition`. Everything still in this file does
- * work beyond `round.status = to`.
+ * rows in the `ROUND_WRITES` table in lib/roundTransitions.ts; the handlers
+ * below are one-liners over `applyRoundWrite`. Everything still in this file
+ * does work beyond `round.status = to`.
  */
 
 import {
@@ -71,7 +71,7 @@ import {
 import { HttpError, withErrorHandler } from "../lib/http.js";
 import { assertCanManageRound, isCoord } from "../lib/roundAuth.js";
 import {
-  applyRoundTransition,
+  applyRoundWrite,
   expectedStatusDetail,
   ROUND_TRANSITIONS,
 } from "../lib/roundTransitions.js";
@@ -456,11 +456,11 @@ async function updateRound(
 
 // ─── POST /api/rounds/{id}/confirm ────────────────────────────────────────────
 
-async function confirmRound(
+function confirmRound(
   req: HttpRequest,
-  _ctx: InvocationContext
+  ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  return { status: 200, jsonBody: await applyRoundTransition(req, "confirm") };
+  return applyRoundWrite(req, ctx, "confirm");
 }
 
 // ─── POST /api/rounds/{id}/brief-complete ─────────────────────────────────────
@@ -783,13 +783,9 @@ async function reopenBrief(
     };
   }
 
-  return {
-    status: 200,
-    jsonBody: {
-      ...(await applyRoundTransition(req, "reopen")),
-      invalidatedSignatureCount: 0,
-    },
-  };
+  return applyRoundWrite(req, _ctx, "reopen", {
+    respond: (round) => ({ ...round, invalidatedSignatureCount: 0 }),
+  });
 }
 
 // ─── POST /api/rounds/{id}/lock ───────────────────────────────────────────────
@@ -1291,11 +1287,11 @@ async function unlockRound(
  * Proposed | Confirmed → Cancelled. A cancelled round accepts no field edits;
  * updateRoundsIndex republishes the Cancelled status to the public rounds blob.
  */
-async function cancelRound(
+function cancelRound(
   req: HttpRequest,
-  _ctx: InvocationContext
+  ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  return { status: 200, jsonBody: await applyRoundTransition(req, "cancel") };
+  return applyRoundWrite(req, ctx, "cancel");
 }
 
 // ─── POST /api/rounds/{id}/uncancel ───────────────────────────────────────────
@@ -1303,11 +1299,11 @@ async function cancelRound(
 /**
  * Cancelled → Proposed. Republishes the restored status to the public blob.
  */
-async function uncancelRound(
+function uncancelRound(
   req: HttpRequest,
-  _ctx: InvocationContext
+  ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  return { status: 200, jsonBody: await applyRoundTransition(req, "uncancel") };
+  return applyRoundWrite(req, ctx, "uncancel");
 }
 
 // ─── POST /api/rounds/{id}/complete ───────────────────────────────────────────
