@@ -58,7 +58,6 @@ import {
   getPrivateBlobClient,
   getPrivateBlockBlobClient,
   withLease,
-  withPrivateLease,
   withPrivateLeaseRenewing,
   withRoundAndBriefLease,
 } from "../lib/blob.js";
@@ -328,49 +327,47 @@ function createRound(
 
 // ─── PUT /api/rounds/{id} ─────────────────────────────────────────────────────
 
-async function updateRound(
+/** The update request body. All fields optional; lifecycle fields are ignored. */
+interface UpdateRoundBody {
+  date?: string;
+  siteId?: string;
+  organisingClubId?: string;
+  maxTeams?: number;
+  minimumScore?: number;
+}
+
+function updateRound(
   req: HttpRequest,
-  _ctx: InvocationContext
+  ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
+  // Per-invocation closure state: `scope` parses the body, `mutate` reads it.
+  // Module-level state here would race across concurrent invocations — each
+  // call must get its own binding (see createRound above).
+  let body!: UpdateRoundBody;
 
-  const id = req.params["id"];
-  if (!id) throw new HttpError(400, "MISSING_ROUND_ID", "Missing round id");
-
-  await assertManageableRound(caller, id);
-
-  const body = (await req.json()) as {
-    date?: string;
-    siteId?: string;
-    organisingClubId?: string;
-    maxTeams?: number;
-    minimumScore?: number;
-  };
-
-  if (
-    !caller.roles.includes("Admin") &&
-    body.organisingClubId &&
-    body.organisingClubId !== caller.clubId
-  ) {
-    return forbiddenResponse("You can only assign rounds to your own club");
-  }
-
-  await mutationRateLimit(req, caller, "updateRound", "standard");
-
-  const path = `rounds/${id}.json`;
-  let updated: Round;
-  let dateChanged = false;
-
-  try {
-    updated = await withPrivateLease(path, async (leaseId) => {
-      const r = await readJson(getPrivateBlobClient(path), RoundSchema, path);
-
+  return applyRoundWrite(req, ctx, "update", {
+    scope: async (c) => {
+      body = (await c.req.json()) as UpdateRoundBody;
+      if (
+        !c.caller.roles.includes("Admin") &&
+        body.organisingClubId &&
+        body.organisingClubId !== c.caller.clubId
+      ) {
+        // Old message "You can only assign rounds to your own club";
+        // withErrorHandler (http.ts:91-101) always dropped it, so the bare
+        // 403 is byte-identical.
+        throw new HttpError(403, "FORBIDDEN");
+      }
+    },
+    gate: (c) => {
       // Cancelled first: isRosterFrozen("Cancelled") is true as well, and the
       // cancelled rejection must stay distinguishable from the frozen one.
-      if (r.status === "Cancelled") {
-        throw new HttpError(409, "ROUND_CANCELLED", "Round is cancelled — uncancel before editing");
+      if (c.round.status === "Cancelled") {
+        throw new HttpError(
+          409,
+          "ROUND_CANCELLED",
+          "Round is cancelled — uncancel before editing",
+        );
       }
 
       // The Fixture — when the round is held, where, who hosts it and how many
@@ -378,13 +375,17 @@ async function updateRound(
       // rule the roster uses. By then everyone is standing on the hill and the
       // brief pilots signed against describes this site. A round arranged wrongly
       // is cancelled and re-scheduled, never re-pointed. (CONTEXT.md: Fixture)
-      if (isRosterFrozen(r.status)) {
+      if (isRosterFrozen(c.round.status)) {
         throw new HttpError(
           409,
           "CONFLICT",
-          `Cannot change the round's date, site, organising club or capacity while ${rosterFrozenReason(r.status)}`,
+          `Cannot change the round's date, site, organising club or capacity while ${rosterFrozenReason(c.round.status)}`,
         );
       }
+    },
+    mutate: async (c) => {
+      let dateChanged = false;
+      const r = c.round;
 
       if (body.date && body.date !== r.date) {
         dateChanged = true;
@@ -447,19 +448,9 @@ async function updateRound(
         );
         scored.scoring = { scoredAt: new Date().toISOString(), ...derivation };
       }
-
-      await writePrivateJson(path, RoundSchema, r, leaseId);
-      return r;
-    });
-  } catch (err: unknown) {
-    if (err instanceof HttpError) throw err;
-    const e = err as { statusCode?: number };
-    if (e.statusCode === 404) throw new HttpError(404, "NOT_FOUND", "Round not found");
-    throw new HttpError(500, "INTERNAL");
-  }
-
-  await updateRoundsIndex(updated);
-  return { status: 200, jsonBody: updated };
+      // The executor persists `c.round` (mutated in place above) and republishes.
+    },
+  });
 }
 
 // ─── POST /api/rounds/{id}/confirm ────────────────────────────────────────────

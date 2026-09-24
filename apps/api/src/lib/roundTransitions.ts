@@ -39,7 +39,7 @@ import { assertCanManageRound, isCoord } from "./roundAuth.js";
 export type RoundTransitionName = "confirm" | "reopen" | "cancel" | "uncancel";
 
 /** The writes the executor can run; grows beyond the pure four in later todos. */
-export type RoundWriteName = RoundTransitionName | "create";
+export type RoundWriteName = RoundTransitionName | "create" | "update";
 
 interface RoundWriteSpecBase {
   /** Rate-limit bucket key suffix — `mutation:{tier}:{endpoint}`. */
@@ -65,8 +65,18 @@ export interface CreateWriteSpec extends RoundWriteSpecBase {
   readonly kind: "create";
 }
 
-/** Grows a union with EditWriteSpec in a later todo. */
-export type RoundWriteSpec = TransitionWriteSpec | CreateWriteSpec;
+/**
+ * The edit write (PUT /api/rounds/{id}): leases and mutates the EXISTING round
+ * like a transition, but has no `from`/`to` — its own `gate` hook carries the
+ * lifecycle checks (Cancelled / roster-frozen) instead of `assertFrom`.
+ */
+export interface EditWriteSpec extends RoundWriteSpecBase {
+  readonly kind: "edit";
+  readonly lease: "round";
+}
+
+/** Grows further (brief-complete / unlock) in later todos. */
+export type RoundWriteSpec = TransitionWriteSpec | CreateWriteSpec | EditWriteSpec;
 
 /** Kept exported for the importers that predate ROUND_WRITES. */
 export type RoundTransitionSpec = TransitionWriteSpec;
@@ -95,6 +105,12 @@ const PURE_TRANSITIONS: Record<RoundTransitionName, TransitionWriteSpec> = {
 export const ROUND_WRITES: Record<RoundWriteName, RoundWriteSpec> = {
   ...PURE_TRANSITIONS,
   create: { kind: "create", endpoint: "createRound", tier: "standard" },
+  update: {
+    kind: "edit",
+    lease: "round",
+    endpoint: "updateRound",
+    tier: "standard",
+  },
 };
 
 export const ROUND_TRANSITIONS: Record<RoundTransitionName, RoundTransitionSpec> =
@@ -260,15 +276,15 @@ async function republishAndRespond<Extra>(
 /**
  * The `round` lease strategy: requireId -> requireCoordCaller, then under the
  * round lease readJson -> assertCanManageRound -> scope (untranslated) ->
- * chargeLimiter -> assertFrom -> gate -> mutate -> `round.status = spec.to` ->
- * writePrivateJson(round); translateStorageError on the way out, then
- * republish and respond (200). The caller is resolved and the round read each
- * exactly once.
+ * chargeLimiter -> [transition only: assertFrom] -> gate -> mutate ->
+ * [transition only: `round.status = spec.to`] -> writePrivateJson(round);
+ * translateStorageError on the way out, then republish and respond (200). The
+ * caller is resolved and the round read each exactly once.
  */
 async function runRoundWrite<Extra>(
   req: HttpRequest,
   ctx: InvocationContext,
-  spec: TransitionWriteSpec,
+  spec: TransitionWriteSpec | EditWriteSpec,
   hooks: RoundWriteHooks<Extra> | undefined
 ): Promise<HttpResponseInit> {
   const id = requireId(req);
@@ -297,12 +313,13 @@ async function runRoundWrite<Extra>(
         }
       }
       await chargeLimiter(req, caller, spec);
-      assertFrom(spec, round);
+      // An edit has no from/to — its gate hook carries the lifecycle checks.
+      if (spec.kind === "transition") assertFrom(spec, round);
       if (hooks?.gate) await hooks.gate(c);
       const produced = hooks?.mutate
         ? await hooks.mutate(c)
         : (undefined as Extra);
-      round.status = spec.to;
+      if (spec.kind === "transition") round.status = spec.to;
       await writePrivateJson(path, RoundSchema, round, leaseId);
       return { round, produced };
     });

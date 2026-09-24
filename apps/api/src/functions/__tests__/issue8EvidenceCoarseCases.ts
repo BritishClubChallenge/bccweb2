@@ -13,7 +13,6 @@ export const COARSE_SELF_CASES: readonly CallSiteCase[] = [
   { file: "flights.ts", handler: "updateFlight", endpoint: "updateFlight", tier: "flights", forbiddenKind: "self-or-admin", setup: async () => { const flightId = randomUUID(); const ownerPilotId = randomUUID(); const round = await roundWithFlight(flightId, ownerPilotId); return { forbidden: await seedEvidenceUser({ roles: ["Pilot"], pilotId: randomUUID() }), request: { method: "PUT", params: { id: round.id, flightId }, body: { distance: 11 } } }; } },
   { file: "flights.ts", handler: "deleteFlight", endpoint: "deleteFlight", tier: "flights", forbiddenKind: "coord-coarse", setup: coordCoarse("DELETE", { id: randomUUID(), flightId: randomUUID() }) },
   { file: "pilots.ts", handler: "updatePilot", endpoint: "updatePilot", tier: "standard", forbiddenKind: "self-or-admin", setup: async () => ({ forbidden: await seedEvidenceUser({ roles: ["Pilot"], pilotId: randomUUID() }), request: { method: "PUT", params: { id: randomUUID() }, body: { firstName: "Nope" } } }) },
-  { file: "roundsMutate.ts", handler: "updateRound", endpoint: "updateRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("PUT", { id: randomUUID() }, { maxTeams: 4 }) },
   { file: "roundsMutate.ts", handler: "briefCompleteRound", endpoint: "briefCompleteRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
   // reopenBrief gates TWICE, once per path: ?dryRun=true takes the preview
   // branch's own literal call site in roundsMutate.ts (below), and the real
