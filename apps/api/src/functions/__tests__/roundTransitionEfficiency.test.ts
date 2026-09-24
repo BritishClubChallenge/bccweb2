@@ -409,3 +409,46 @@ describe("round writes - updateRound (issue 277)", () => {
     expect(republish).not.toHaveBeenCalled();
   });
 });
+
+// ─── reopenBrief dryRun preview (issue 277, todo 4) ───────────────────────────
+
+describe("round writes - reopenBrief dryRun preview (issue 277)", () => {
+  beforeEach(() => resetAllBuckets());
+
+  it("preview reads rounds/{id}.json once, resolves the caller once, and never republishes", async () => {
+    const round = await seedRoundAt("BriefComplete");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res, reads, callers } = await measureWrite(
+      user,
+      "reopenBrief",
+      { method: "POST", params: { id: round.id }, query: { dryRun: "true" } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(200);
+
+    // Vacuity guards — same reasoning as the transition budget above.
+    expect(reads).toBeGreaterThanOrEqual(1);
+    expect(callers).toBeGreaterThanOrEqual(1);
+
+    expect.soft(reads).toBe(1);
+    expect.soft(callers).toBe(1);
+    expect(republish).not.toHaveBeenCalled();
+  });
+
+  it("a Confirmed round's preview 409s and does not republish", async () => {
+    const round = await seedRoundAt("Confirmed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res } = await measureWrite(
+      user,
+      "reopenBrief",
+      { method: "POST", params: { id: round.id }, query: { dryRun: "true" } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(republish).not.toHaveBeenCalled();
+  });
+});

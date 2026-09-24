@@ -20,6 +20,15 @@ import {
   writePrivateJson,
 } from "../../__tests__/helpers/seed.js";
 import { mutationRateLimit, resetAllBuckets } from "../../lib/rateLimit.js";
+import type { CallSiteCase } from "./issue8EvidenceHarness.js";
+import {
+  crossClubCoord,
+  invokeEvidenceHandler,
+  makeEvidenceRequest,
+  retryAfter,
+  saturateOwnBucket,
+} from "./issue8EvidenceHarness.js";
+import { roundForOtherClub } from "./issue8EvidenceFixtures.js";
 
 // ─── Shared scaffolding (todos 1-6 build on this) ─────────────────────────────
 
@@ -654,5 +663,157 @@ describe("updateRound responses (issue 277)", () => {
       endpoint: "updateRound",
       tier: "standard",
     });
+  });
+});
+
+// ─── (h) reopenBrief dryRun preview contract (todo 4) ─────────────────────────
+
+describe("reopenBrief dryRun preview (issue 277)", () => {
+  it("unauthenticated -> 401 UNAUTHORIZED", async () => {
+    const { round } = await seedRoundAt("BriefComplete");
+    const res = await call("reopenBrief", null, {
+      method: "POST",
+      params: { id: round.id },
+      query: { dryRun: "true" },
+    });
+    expect(res.status).toBe(401);
+    expect(res.jsonBody).toEqual(UNAUTHORIZED);
+  });
+
+  it("Pilot -> 403 FORBIDDEN", async () => {
+    const { round } = await seedRoundAt("BriefComplete");
+    const { user } = await makeUser({ roles: ["Pilot"] });
+    const res = await call("reopenBrief", user, {
+      method: "POST",
+      params: { id: round.id },
+      query: { dryRun: "true" },
+    });
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toEqual(FORBIDDEN);
+  });
+
+  it("Admin on a missing round -> 404 NOT_FOUND", async () => {
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const res = await call("reopenBrief", user, {
+      method: "POST",
+      params: { id: randomUUID() },
+      query: { dryRun: "true" },
+    });
+    expect(res.status).toBe(404);
+    expect(res.jsonBody).toEqual(NOT_FOUND);
+  });
+
+  it("RoundsCoord of club B on a club-A BriefComplete round -> 403 SCOPE_FORBIDDEN", async () => {
+    const clubA = randomUUID();
+    const { round } = await seedRoundAt("BriefComplete", clubA);
+    const clubB = randomUUID();
+    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: clubB });
+    const res = await call("reopenBrief", user, {
+      method: "POST",
+      params: { id: round.id },
+      query: { dryRun: "true" },
+    });
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toEqual(SCOPE_FORBIDDEN);
+  });
+
+  it("saturated own bucket: cross-club coord still gets 403, never 429", async () => {
+    // Reproduces the ordering coverage the deleted issue8EvidenceCoarseCases.ts
+    // dryRun row gave, in the coord-SCOPE shape: the preview's scope check must
+    // resolve BEFORE the limiter, so a saturated bucket cannot flip a forbidden
+    // caller to 429. The row literal is NOT added to any evidence file — the
+    // literal call site it used to pin (roundsMutate.ts's own
+    // mutationRateLimit("reopenBrief", ...)) is gone, and the real path's
+    // ordering stays covered by issue8EvidenceScopedCases.ts's reopenBrief row.
+    const context = {
+      forbidden: await crossClubCoord(),
+      request: {
+        method: "POST",
+        params: { id: (await roundForOtherClub("BriefComplete")).id },
+        query: { dryRun: "true" },
+      },
+    };
+    const row: CallSiteCase = {
+      file: "roundTransitions.ts",
+      handler: "reopenBrief",
+      endpoint: "reopenBrief",
+      tier: "standard",
+      forbiddenKind: "coord-scope",
+      setup: () => Promise.resolve(context),
+    };
+    resetAllBuckets();
+    await saturateOwnBucket(row, context);
+    const res = await invokeEvidenceHandler(
+      "reopenBrief",
+      makeEvidenceRequest(context.forbidden, context.request),
+    );
+    expect(res.status).toBe(403);
+    expect((res.jsonBody as { code?: string } | undefined)?.code).toBe(
+      "FORBIDDEN",
+    );
+    expect(retryAfter(res)).toBeUndefined();
+  });
+
+  it("Admin preview -> 200 { invalidatedSignatureCount: 0 }, round and brief ETags unchanged", async () => {
+    const { round } = await seedRoundAt("BriefComplete");
+    const roundEtagBefore = await etag(`rounds/${round.id}.json`);
+    const briefEtagBefore = await etag(`round-briefs/${round.id}.json`);
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const res = await call("reopenBrief", user, {
+      method: "POST",
+      params: { id: round.id },
+      query: { dryRun: "true" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.jsonBody).toEqual({ invalidatedSignatureCount: 0 });
+    expect(await etag(`rounds/${round.id}.json`)).toBe(roundEtagBefore);
+    expect(await etag(`round-briefs/${round.id}.json`)).toBe(briefEtagBefore);
+  });
+
+  it("unsafe id -> 400 INVALID_BLOB_PATH (E4: 500 on the pre-executor dryRun branch)", async () => {
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const res = await call("reopenBrief", user, {
+      method: "POST",
+      params: { id: "a@b" },
+      query: { dryRun: "true" },
+    });
+    expect(res.status).toBe(400);
+    expect(res.jsonBody).toEqual(INVALID_BLOB_PATH);
+  });
+
+  it("charges reopenBrief/standard once for the preview and once for the real reopen", async () => {
+    const { round } = await seedRoundAt("BriefComplete");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const preview = await call("reopenBrief", user, {
+      method: "POST",
+      params: { id: round.id },
+      query: { dryRun: "true" },
+    });
+    expect(preview.status).toBe(200);
+    let limiter = vi.mocked(mutationRateLimit);
+    expect(limiter).toHaveBeenCalledTimes(1);
+    expect(limiter.mock.calls[0]?.[2]).toBe("reopenBrief");
+    expect(limiter.mock.calls[0]?.[3]).toBe("standard");
+
+    const real = await call("reopenBrief", user, {
+      method: "POST",
+      params: { id: round.id },
+    });
+    expect(real.status).toBe(200);
+    limiter = vi.mocked(mutationRateLimit);
+    expect(limiter).toHaveBeenCalledTimes(1);
+    expect(limiter.mock.calls[0]?.[2]).toBe("reopenBrief");
+    expect(limiter.mock.calls[0]?.[3]).toBe("standard");
+  });
+
+  it("structural: reopenBrief passes the preamble check and contains applyRoundWrite(", () => {
+    const body = handlerSource(ROUNDS_MUTATE_SOURCE, "reopenBrief");
+    expect(body).toContain("applyRoundWrite(");
+    for (const token of PREAMBLE_TOKENS) {
+      expect(body).not.toContain(token);
+    }
   });
 });
