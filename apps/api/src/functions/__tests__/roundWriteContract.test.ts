@@ -16,6 +16,7 @@ import { getPrivateContainer } from "../../__tests__/helpers/azurite.js";
 import {
   makeRound,
   makeUser,
+  privateBlobExists,
   readPrivateJson,
   writePrivateJson,
 } from "../../__tests__/helpers/seed.js";
@@ -979,5 +980,163 @@ describe("briefCompleteRound responses (issue 277)", () => {
       endpoint: "briefCompleteRound",
       tier: "standard",
     });
+  });
+});
+
+// ─── (j) unlockRound contract (todo 6) ────────────────────────────────────────
+// The `pureTrackEchoes` strategy delegates the lease/read/clone/write/rollback
+// lifecycle to `mutatePureTrackEchoes` (lib/puretrackStatus.ts:149-195): the
+// ONLY status check is the `assertFrom` INSIDE its callback (no pre-lease
+// gate), and the call sits OUTSIDE the executor's translateStorageError so an
+// injected round-write failure reaches withErrorHandler's generic catch-all
+// with the LOWERCASE "Internal server error" body, never the capital-S
+// HttpError shape.
+
+describe("unlockRound responses (issue 277)", () => {
+  it("unauthenticated -> 401 UNAUTHORIZED", async () => {
+    const clubA = randomUUID();
+    const { round } = await seedRoundAt("Locked", clubA);
+    const res = await call("unlockRound", null, {
+      method: "POST",
+      params: { id: round.id },
+    });
+    expect(res.status).toBe(401);
+    expect(res.jsonBody).toEqual(UNAUTHORIZED);
+  });
+
+  it("Pilot -> 403 FORBIDDEN", async () => {
+    const clubA = randomUUID();
+    const { round } = await seedRoundAt("Locked", clubA);
+    const { user } = await makeUser({ roles: ["Pilot"] });
+    const res = await call("unlockRound", user, {
+      method: "POST",
+      params: { id: round.id },
+    });
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toEqual(FORBIDDEN);
+  });
+
+  it("RoundsCoord of club B on a club-A round -> 403 SCOPE_FORBIDDEN, round and brief bytes unchanged", async () => {
+    const clubA = randomUUID();
+    const { round } = await seedRoundAt("Locked", clubA);
+    const roundBefore = await bytes(`rounds/${round.id}.json`);
+    const briefBefore = await bytes(`round-briefs/${round.id}.json`);
+    const clubB = randomUUID();
+    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: clubB });
+    const res = await call("unlockRound", user, {
+      method: "POST",
+      params: { id: round.id },
+    });
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toEqual(SCOPE_FORBIDDEN);
+    expect(await bytes(`rounds/${round.id}.json`)).toEqual(roundBefore);
+    expect(await bytes(`round-briefs/${round.id}.json`)).toEqual(briefBefore);
+  });
+
+  it("Admin on a missing round -> 404 NOT_FOUND and creates no placeholder brief", async () => {
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const id = randomUUID();
+    const res = await call("unlockRound", user, {
+      method: "POST",
+      params: { id },
+    });
+    expect(res.status).toBe(404);
+    expect(res.jsonBody).toEqual(NOT_FOUND);
+    // The unleased pre-read 404s BEFORE mutatePureTrackEchoes runs, so its
+    // ensureBriefExists never gets the chance to placeholder-create one.
+    expect(await privateBlobExists(`round-briefs/${id}.json`)).toBe(false);
+  });
+
+  it("injected round write failure -> 500 GENERIC_500 (the lowercase generic catch-all)", async () => {
+    const clubA = randomUUID();
+    const { round } = await seedRoundAt("Locked", clubA);
+    const { user } = await makeUser({ roles: ["Admin"] });
+    roundWriteControl.failRoundWrites = true;
+    try {
+      const res = await call("unlockRound", user, {
+        method: "POST",
+        params: { id: round.id },
+      });
+      expect(res.status).toBe(500);
+      // mutatePureTrackEchoes sits OUTSIDE translateStorageError, so its plain
+      // (non-HttpError) failure must reach withErrorHandler's generic catch-all
+      // unchanged — "Internal server error", NOT the HttpError "Internal Server
+      // Error" shape. Wrapping the call would flip this byte (the todo 6
+      // falsification probe).
+      expect(res.jsonBody).toEqual(GENERIC_500);
+    } finally {
+      roundWriteControl.failRoundWrites = false;
+    }
+  });
+
+  it("unsafe id -> 400 INVALID_BLOB_PATH (E4: 500 via assertManageableRound's catch-all on the old handler)", async () => {
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const res = await call("unlockRound", user, {
+      method: "POST",
+      params: { id: "a@b" },
+    });
+    expect(res.status).toBe(400);
+    expect(res.jsonBody).toEqual(INVALID_BLOB_PATH);
+  });
+
+  it("Admin unlock on a Locked round -> 200 Confirmed and charges unlockRound/standard once", async () => {
+    const clubA = randomUUID();
+    const { round } = await seedRoundAt("Locked", clubA);
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const res = await call("unlockRound", user, {
+      method: "POST",
+      params: { id: round.id },
+    });
+    expect(res.status).toBe(200);
+    expect((res.jsonBody as Round).status).toBe("Confirmed");
+    expect((res.jsonBody as Round).isLocked).toBe(false);
+    const limiter = vi.mocked(mutationRateLimit);
+    expect(limiter).toHaveBeenCalledTimes(1);
+    expect(limiter.mock.calls[0]?.[2]).toBe("unlockRound");
+    expect(limiter.mock.calls[0]?.[3]).toBe("standard");
+  });
+
+  it("a Confirmed round -> 409 CONFLICT and no republish", async () => {
+    const clubA = randomUUID();
+    const { round } = await seedRoundAt("Confirmed", clubA);
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const res = await call("unlockRound", user, {
+      method: "POST",
+      params: { id: round.id },
+    });
+    expect(res.status).toBe(409);
+    expect(res.jsonBody).toEqual({
+      error: "Conflict",
+      code: "CONFLICT",
+      detail: "Expected status Locked, got Confirmed",
+    });
+    expect((await readPrivateJson<Round>(`rounds/${round.id}.json`))?.status).toBe(
+      "Confirmed",
+    );
+  });
+
+  it("structural: unlockRound passes the preamble check and contains applyRoundWrite(", () => {
+    const body = handlerSource(ROUNDS_MUTATE_SOURCE, "unlockRound");
+    expect(body).toContain("applyRoundWrite(");
+    for (const token of PREAMBLE_TOKENS) {
+      expect(body).not.toContain(token);
+    }
+  });
+
+  it("structural: assertManageableRound is gone from roundsMutate.ts", () => {
+    expect(ROUNDS_MUTATE_SOURCE).not.toContain("assertManageableRound");
+  });
+
+  it("structural: ROUND_WRITES has exactly the eight final keys", () => {
+    expect(Object.keys(writes ?? {}).sort()).toEqual([
+      "briefComplete",
+      "cancel",
+      "confirm",
+      "create",
+      "reopen",
+      "uncancel",
+      "unlock",
+      "update",
+    ]);
   });
 });

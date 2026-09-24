@@ -525,3 +525,56 @@ describe("round writes - briefCompleteRound (issue 277)", () => {
     );
   });
 });
+
+// ─── unlockRound (issue 277, todo 6) ──────────────────────────────────────────
+
+describe("round writes - unlockRound (issue 277)", () => {
+  beforeEach(() => resetAllBuckets());
+
+  it("reads rounds/{id}.json twice (pre-read + leased), resolves the caller once, republishes once with Confirmed", async () => {
+    const round = await seedRoundAt("Locked");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res, reads, callers } = await measureWrite(
+      user,
+      "unlockRound",
+      { method: "POST", params: { id: round.id } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(200);
+
+    // Vacuity guards — same reasoning as the transition budget above.
+    expect(reads).toBeGreaterThanOrEqual(1);
+    expect(callers).toBeGreaterThanOrEqual(1);
+
+    // TWO reads is the target, like briefComplete: the unleased pre-read feeds
+    // assertCanManageRound, then mutatePureTrackEchoes re-reads the round
+    // INSIDE its lease (there is deliberately NO pre-lease status gate — the
+    // only assertFrom runs in the callback).
+    expect.soft(reads).toBe(2);
+    expect.soft(callers).toBe(1);
+    expect(republish).toHaveBeenCalledTimes(1);
+    expect(republish).toHaveBeenCalledWith(
+      expect.objectContaining({ id: round.id, status: "Confirmed" }),
+    );
+  });
+
+  it("a Confirmed round 409s and does not republish", async () => {
+    const round = await seedRoundAt("Confirmed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res } = await measureWrite(
+      user,
+      "unlockRound",
+      { method: "POST", params: { id: round.id } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(republish).not.toHaveBeenCalled();
+    expect((await readPrivateJson<Round>(`rounds/${round.id}.json`))?.status).toBe(
+      "Confirmed",
+    );
+  });
+});
