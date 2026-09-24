@@ -12,7 +12,7 @@
  *
  * Todo 1 of #277 covers the four PURE status transitions (confirm / reopen /
  * cancel / uncancel): the whole mutation is `round.status = to`. Writes that do
- * more (create, update, brief-complete, unlock) join the table in later todos;
+ * more (create, update, brief-complete, unlock) have since joined the table;
  * `lockRound`/`completeRound` remain bespoke in `functions/roundsMutate.ts`
  * (#275 / #276).
  *
@@ -33,13 +33,19 @@ import { getPrivateBlobClient, withPrivateLease, withRoundAndBriefLease } from "
 import { readJson, writePrivateJson } from "./blobJson.js";
 import { HttpError } from "./http.js";
 import { mutationRateLimit, type MutationRateLimitTier } from "./rateLimit.js";
+import { mutatePureTrackEchoes } from "./puretrackStatus.js";
 import { updateRoundsIndex } from "./recompute.js";
 import { assertCanManageRound, isCoord } from "./roundAuth.js";
 
 export type RoundTransitionName = "confirm" | "reopen" | "cancel" | "uncancel";
 
 /** The writes the executor can run; grows beyond the pure four in later todos. */
-export type RoundWriteName = RoundTransitionName | "create" | "update" | "briefComplete";
+export type RoundWriteName =
+  | RoundTransitionName
+  | "create"
+  | "update"
+  | "briefComplete"
+  | "unlock";
 
 interface RoundWriteSpecBase {
   /** Rate-limit bucket key suffix — `mutation:{tier}:{endpoint}`. */
@@ -52,8 +58,8 @@ export interface TransitionWriteSpec extends RoundWriteSpecBase {
   /** Statuses the transition accepts; anything else is a 409. */
   readonly from: readonly RoundStatus[];
   readonly to: RoundStatus;
-  /** Lease strategy; grows to "pureTrackEchoes" later. */
-  readonly lease: "round" | "roundAndBrief";
+  /** Lease strategy. */
+  readonly lease: "round" | "roundAndBrief" | "pureTrackEchoes";
 }
 
 /**
@@ -75,7 +81,7 @@ export interface EditWriteSpec extends RoundWriteSpecBase {
   readonly lease: "round";
 }
 
-/** Grows further (brief-complete / unlock) in later todos. */
+/** The full write-spec union (all eight rows have landed). */
 export type RoundWriteSpec = TransitionWriteSpec | CreateWriteSpec | EditWriteSpec;
 
 /** Kept exported for the importers that predate ROUND_WRITES. */
@@ -117,6 +123,14 @@ export const ROUND_WRITES: Record<RoundWriteName, RoundWriteSpec> = {
     to: "BriefComplete",
     lease: "roundAndBrief",
     endpoint: "briefCompleteRound",
+    tier: "standard",
+  },
+  unlock: {
+    kind: "transition",
+    from: ["Locked"],
+    to: "Confirmed",
+    lease: "pureTrackEchoes",
+    endpoint: "unlockRound",
     tier: "standard",
   },
 };
@@ -467,6 +481,77 @@ async function runRoundAndBriefWrite<Extra>(
 }
 
 /**
+ * The `pureTrackEchoes` lease strategy (unlock): requireId ->
+ * requireCoordCaller -> readRoundTranslated -> assertCanManageRound -> scope ->
+ * chargeLimiter -> mutatePureTrackEchoes(id, cb{ [L] assertFrom -> gate ->
+ * mutate({round, brief}) -> `round.status = spec.to` -> capture -> return
+ * true }) -> republish -> respond (200).
+ *
+ * Unlike the other strategies this one DELEGATES the whole
+ * lease/read/clone/write/rollback lifecycle to `mutatePureTrackEchoes`
+ * (lib/puretrackStatus.ts), which owns its own dual lease, lazy
+ * placeholder-brief creation, structuredClone, brief-then-round persist and
+ * same-blob rollback. Two deliberate differences from `roundAndBrief`:
+ *
+ * - The call sits OUTSIDE translateStorageError: a plain (non-HttpError)
+ *   failure from the delegated call — e.g. an injected writePrivateJson
+ *   failure — must reach withErrorHandler's generic catch-all UNCHANGED (the
+ *   lowercase "Internal server error" body), exactly as the hand-rolled
+ *   handler behaved (roundsMutate.ts, pre-#277).
+ * - There is NO pre-lease status check: the ONLY `assertFrom` runs inside the
+ *   callback, on the leased clone. The unleased pre-read exists solely to
+ *   feed `assertCanManageRound` — it deliberately never gates status, so a
+ *   status change between pre-read and lease is caught by the in-lease check,
+ *   and `ensureBriefExists` never gets to placeholder-create a brief for a
+ *   round that does not exist (the pre-read 404s first).
+ */
+async function runPureTrackEchoesWrite<Extra>(
+  req: HttpRequest,
+  ctx: InvocationContext,
+  spec: TransitionWriteSpec,
+  hooks: RoundWriteHooks<Extra> | undefined
+): Promise<HttpResponseInit> {
+  const id = requireId(req);
+  const caller = await requireCoordCaller(req);
+
+  const path = `rounds/${id}.json`;
+
+  // The shared unleased preamble: pre-read (scope input ONLY — never a status
+  // gate), fine scope, limiter. No try/catch — readRoundTranslated
+  // self-contains its translation and hook HttpErrors propagate straight to
+  // withErrorHandler.
+  const preRound = await readRoundTranslated(path);
+  assertCanManageRound(caller, preRound);
+  const preContext: RoundWriteContext = { req, ctx, caller, id, round: preRound };
+  if (hooks?.scope) await hooks.scope(preContext);
+  await chargeLimiter(req, caller, spec);
+
+  let capturedRound: Round | undefined;
+  // Definite-assignment: TS cannot prove the callback runs, but the guard
+  // below throws unless capturedRound was set — and both are assigned together.
+  let capturedExtra!: Extra;
+
+  await mutatePureTrackEchoes(id, async ({ round, brief }) => {
+    assertFrom(spec, round);
+    const c: RoundWriteContext = { req, ctx, caller, id, round, brief };
+    if (hooks?.gate) await hooks.gate(c);
+    const produced = hooks?.mutate
+      ? await hooks.mutate(c)
+      : (undefined as Extra);
+    round.status = spec.to;
+    capturedRound = round;
+    capturedExtra = produced;
+    return true;
+  });
+
+  // Defensive guard, preserved from the pre-#277 handler: every actual code
+  // path either throws or captures, but an uncaptured round is a 500, never a
+  // silently empty 200.
+  if (capturedRound === undefined) throw new HttpError(500, "INTERNAL");
+  return republishAndRespond(capturedRound, hooks, capturedExtra);
+}
+
+/**
  * The `create` write: requireCoordCaller -> scope -> chargeLimiter -> mutate
  * (which builds AND persists the new round, returning it) -> republish ->
  * after -> respond (201). No id guard, no lease and no storage-error
@@ -526,6 +611,14 @@ export function applyRoundWrite<Extra = undefined>(
   }
   if (spec.kind === "transition" && spec.lease === "roundAndBrief") {
     return runRoundAndBriefWrite(
+      req,
+      ctx,
+      spec,
+      hooks as RoundWriteHooks<Extra> | undefined
+    );
+  }
+  if (spec.kind === "transition" && spec.lease === "pureTrackEchoes") {
+    return runPureTrackEchoesWrite(
       req,
       ctx,
       spec,

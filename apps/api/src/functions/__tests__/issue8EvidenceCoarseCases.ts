@@ -14,7 +14,6 @@ export const COARSE_SELF_CASES: readonly CallSiteCase[] = [
   { file: "flights.ts", handler: "deleteFlight", endpoint: "deleteFlight", tier: "flights", forbiddenKind: "coord-coarse", setup: coordCoarse("DELETE", { id: randomUUID(), flightId: randomUUID() }) },
   { file: "pilots.ts", handler: "updatePilot", endpoint: "updatePilot", tier: "standard", forbiddenKind: "self-or-admin", setup: async () => ({ forbidden: await seedEvidenceUser({ roles: ["Pilot"], pilotId: randomUUID() }), request: { method: "PUT", params: { id: randomUUID() }, body: { firstName: "Nope" } } }) },
   { file: "roundsMutate.ts", handler: "lockRound", endpoint: "lockRound", tier: "heavy", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
-  { file: "roundsMutate.ts", handler: "unlockRound", endpoint: "unlockRound", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
   { file: "roundsMutate.ts", handler: "completeRound", endpoint: "completeRound", tier: "heavy", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }) },
   { file: "teams.ts", handler: "addTeam", endpoint: "addTeam", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("POST", { id: randomUUID() }, { clubId: randomUUID(), teamName: "Alpha" }) },
   { file: "teams.ts", handler: "removeTeam", endpoint: "removeTeam", tier: "standard", forbiddenKind: "coord-coarse", setup: coordCoarse("DELETE", { id: randomUUID(), teamId: randomUUID() }) },

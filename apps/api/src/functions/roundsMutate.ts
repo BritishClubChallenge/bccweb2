@@ -14,10 +14,12 @@
  * POST   /api/rounds/{id}/uncancel         — Cancelled → Proposed
  * POST   /api/rounds/{id}/complete         — Locked → Complete + score + recompute
  *
- * The four PURE status transitions (confirm, reopen, cancel, uncancel) are
- * rows in the `ROUND_WRITES` table in lib/roundTransitions.ts; the handlers
- * below are one-liners over `applyRoundWrite`. Everything still in this file
- * does work beyond `round.status = to`.
+ * Eight of these endpoints (create, update, confirm, brief-complete, reopen,
+ * cancel, uncancel, unlock) are rows in the `ROUND_WRITES` table in
+ * lib/roundTransitions.ts — the handlers below are one-liners over
+ * `applyRoundWrite`, each carrying only its own hooks. `lockRound` and
+ * `completeRound` remain bespoke here pending #275/#276, as do the
+ * brief/PureTrack/PDF/email helpers they and the table hooks share.
  */
 
 import {
@@ -28,7 +30,6 @@ import {
 } from "@azure/functions";
 import { randomUUID } from "node:crypto";
 import type {
-  CallerIdentity,
   Round,
   RoundStatus,
   Season,
@@ -76,7 +77,6 @@ import { setBriefPdfStatus } from "../lib/briefPdf.js";
 import { enqueueBriefPdf, enqueuePureTrackGroupJob } from "../lib/queue.js";
 import {
   clearPureTrackEchoes,
-  mutatePureTrackEchoes,
   setPureTrackStatus,
 } from "../lib/puretrackStatus.js";
 import { getTelemetryClient } from "../lib/telemetry.js";
@@ -93,25 +93,6 @@ export interface BriefTimes {
   briefingTime?: string;
   checkInByTime?: string;
   landByTime?: string;
-}
-
-// ─── Auth helpers ─────────────────────────────────────────────────────────────
-
-async function assertManageableRound(
-  caller: CallerIdentity,
-  id: string,
-): Promise<void> {
-  const path = `rounds/${id}.json`;
-  let round: Round;
-  try {
-    round = await readJson(getPrivateBlobClient(path), RoundSchema, path);
-  } catch (err: unknown) {
-    if ((err as { statusCode?: number }).statusCode === 404) {
-      throw new HttpError(404, "NOT_FOUND", "Round not found");
-    }
-    throw new HttpError(500, "INTERNAL");
-  }
-  assertCanManageRound(caller, round);
 }
 
 // Schemas for blobs without dedicated re-exports.
@@ -1084,56 +1065,45 @@ async function lockRound(
   return { status: 200, jsonBody: updated };
 }
 
-async function unlockRound(
+/**
+ * Locked → Confirmed. Clears the PureTrack echo fields, the lock-time pilot
+ * snapshots (re-taken at next lock) and the brief PDF state; the executor sets
+ * `round.status = "Confirmed"` and republishes. Runs on the `pureTrackEchoes`
+ * strategy: `mutatePureTrackEchoes` owns the lease/clone/write/rollback, and
+ * the only status gate is the in-callback `assertFrom` (no pre-lease check).
+ */
+function unlockRound(
   req: HttpRequest,
-  _ctx: InvocationContext
+  ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  const id = req.params["id"];
-  if (!id) throw new HttpError(400, "MISSING_ROUND_ID", "Missing round id");
-
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
-  await assertManageableRound(caller, id);
-  await mutationRateLimit(req, caller, "unlockRound", "standard");
-
-  let updated: Round | undefined;
-  await mutatePureTrackEchoes(id, ({ round, brief }) => {
-    if (round.status !== "Locked") {
-      throw new HttpError(
-        409,
-        "CONFLICT",
-        `Expected status Locked, got ${round.status}`,
-      );
-    }
-    if (round.pureTrack?.status === "pending" || round.pureTrack?.status === "processing") {
-      throw new HttpError(
-        409,
-        "PURETRACK_IN_PROGRESS",
-        "PureTrack group creation must finish before unlocking the round",
-      );
-    }
-    round.status = "Confirmed";
-    round.pureTrack = undefined;
-    round.isLocked = false;
-    if (round.brief) {
-      round.brief.pdfStatus = undefined;
-      round.brief.pdfError = undefined;
-      round.brief.pdfAttemptId = undefined;
-    }
-    // Clear snapshots so they are re-taken at next lock
-    for (const team of round.teams) {
-      for (const slot of team.pilots) {
-        slot.snapshot = null;
+  return applyRoundWrite(req, ctx, "unlock", {
+    gate: (c) => {
+      if (c.round.pureTrack?.status === "pending" || c.round.pureTrack?.status === "processing") {
+        throw new HttpError(
+          409,
+          "PURETRACK_IN_PROGRESS",
+          "PureTrack group creation must finish before unlocking the round",
+        );
       }
-    }
-    clearPureTrackEchoes(round, brief);
-    updated = round;
-    return true;
+    },
+    mutate: (c) => {
+      const { round, brief } = c;
+      round.pureTrack = undefined;
+      round.isLocked = false;
+      if (round.brief) {
+        round.brief.pdfStatus = undefined;
+        round.brief.pdfError = undefined;
+        round.brief.pdfAttemptId = undefined;
+      }
+      // Clear snapshots so they are re-taken at next lock
+      for (const team of round.teams) {
+        for (const slot of team.pilots) {
+          slot.snapshot = null;
+        }
+      }
+      clearPureTrackEchoes(round, brief!);
+    },
   });
-  if (updated === undefined) throw new HttpError(500, "INTERNAL");
-  await updateRoundsIndex(updated);
-  return { status: 200, jsonBody: updated };
 }
 
 // ─── POST /api/rounds/{id}/cancel ─────────────────────────────────────────────
