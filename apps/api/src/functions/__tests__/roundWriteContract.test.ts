@@ -527,3 +527,132 @@ describe("createRound concurrent invocations stay isolated (issue 277)", () => {
     }
   });
 });
+
+// ─── (g) updateRound contract (todo 3) ────────────────────────────────────────
+
+describe("updateRound responses (issue 277)", () => {
+  it("unauthenticated -> 401 UNAUTHORIZED", async () => {
+    const clubA = randomUUID();
+    const { round } = await seedRoundAt("Proposed", clubA);
+    const res = await call("updateRound", null, {
+      method: "PUT",
+      params: { id: round.id },
+      body: { maxTeams: 4 },
+    });
+    expect(res.status).toBe(401);
+    expect(res.jsonBody).toEqual(UNAUTHORIZED);
+  });
+
+  it("Pilot -> 403 FORBIDDEN", async () => {
+    const clubA = randomUUID();
+    const { round } = await seedRoundAt("Proposed", clubA);
+    const { user } = await makeUser({ roles: ["Pilot"] });
+    const res = await call("updateRound", user, {
+      method: "PUT",
+      params: { id: round.id },
+      body: { maxTeams: 4 },
+    });
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toEqual(FORBIDDEN);
+  });
+
+  it("RoundsCoord of club A changing organisingClubId -> 403 FORBIDDEN with no detail", async () => {
+    const clubA = randomUUID();
+    const { round } = await seedRoundAt("Proposed", clubA);
+    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: clubA });
+    const res = await call("updateRound", user, {
+      method: "PUT",
+      params: { id: round.id },
+      body: { organisingClubId: randomUUID() },
+    });
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toEqual(FORBIDDEN);
+  });
+
+  it("Admin on a missing round -> 404 NOT_FOUND", async () => {
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const res = await call("updateRound", user, {
+      method: "PUT",
+      params: { id: randomUUID() },
+      body: { maxTeams: 4 },
+    });
+    expect(res.status).toBe(404);
+    expect(res.jsonBody).toEqual(NOT_FOUND);
+  });
+
+  it("RoundsCoord of club B on a club-A round -> 403 SCOPE_FORBIDDEN, bytes unchanged", async () => {
+    const clubA = randomUUID();
+    const { round } = await seedRoundAt("Proposed", clubA);
+    const before = await bytes(`rounds/${round.id}.json`);
+    const clubB = randomUUID();
+    const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: clubB });
+    const res = await call("updateRound", user, {
+      method: "PUT",
+      params: { id: round.id },
+      body: { maxTeams: 4 },
+    });
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toEqual(SCOPE_FORBIDDEN);
+    expect(await bytes(`rounds/${round.id}.json`)).toEqual(before);
+  });
+
+  it("malformed JSON -> 500 GENERIC_500", async () => {
+    const clubA = randomUUID();
+    const { round } = await seedRoundAt("Proposed", clubA);
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const req = makeAuthRequest(user.id, user.email, {
+      method: "PUT",
+      params: { id: round.id },
+    });
+    req.json = () => Promise.reject(new SyntaxError("Unexpected token"));
+    vi.mocked(mutationRateLimit).mockClear();
+    const res = await invoke("updateRound", req);
+    expect(res.status).toBe(500);
+    expect(res.jsonBody).toEqual(GENERIC_500);
+  });
+
+  it("unsafe id -> 400 INVALID_BLOB_PATH (E4: 500 on unrefactored main)", async () => {
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const res = await call("updateRound", user, {
+      method: "PUT",
+      params: { id: "a@b" },
+      body: { maxTeams: 4 },
+    });
+    expect(res.status).toBe(400);
+    expect(res.jsonBody).toEqual(INVALID_BLOB_PATH);
+  });
+
+  it("Admin valid update -> 200 and charges updateRound/standard once", async () => {
+    const clubA = randomUUID();
+    const { round } = await seedRoundAt("Proposed", clubA);
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const res = await call("updateRound", user, {
+      method: "PUT",
+      params: { id: round.id },
+      body: { maxTeams: 4 },
+    });
+    expect(res.status).toBe(200);
+    expect((res.jsonBody as Round).maxTeams).toBe(4);
+    const limiter = vi.mocked(mutationRateLimit);
+    expect(limiter).toHaveBeenCalledTimes(1);
+    expect(limiter.mock.calls[0]?.[2]).toBe("updateRound");
+    expect(limiter.mock.calls[0]?.[3]).toBe("standard");
+  });
+
+  it("structural: updateRound passes the preamble check and contains applyRoundWrite(", () => {
+    const body = handlerSource(ROUNDS_MUTATE_SOURCE, "updateRound");
+    expect(body).toContain("applyRoundWrite(");
+    for (const token of PREAMBLE_TOKENS) {
+      expect(body).not.toContain(token);
+    }
+  });
+
+  it("structural: ROUND_WRITES.update equals its row", () => {
+    expect(writes?.["update"]).toEqual({
+      kind: "edit",
+      lease: "round",
+      endpoint: "updateRound",
+      tier: "standard",
+    });
+  });
+});

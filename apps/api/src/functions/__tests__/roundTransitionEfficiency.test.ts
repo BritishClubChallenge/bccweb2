@@ -348,3 +348,64 @@ describe("round writes - createRound (issue 277)", () => {
     expect(republish).not.toHaveBeenCalled();
   });
 });
+
+// ─── updateRound (issue 277, todo 3) ──────────────────────────────────────────
+
+describe("round writes - updateRound (issue 277)", () => {
+  beforeEach(() => resetAllBuckets());
+
+  it("reads rounds/{id}.json once and resolves the caller once", async () => {
+    const round = await seedRoundAt("Proposed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res, reads, callers } = await measureWrite(
+      user,
+      "updateRound",
+      { method: "PUT", params: { id: round.id }, body: { maxTeams: 4 } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(200);
+
+    // Vacuity guards — same reasoning as the transition budget above: a
+    // mis-scoped path filter must fail loudly, never masquerade as the target.
+    expect(reads).toBeGreaterThanOrEqual(1);
+    expect(callers).toBeGreaterThanOrEqual(1);
+
+    expect.soft(reads).toBe(1);
+    expect.soft(callers).toBe(1);
+  });
+
+  it("republishes the updated round exactly once", async () => {
+    const round = await seedRoundAt("Proposed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res } = await measureWrite(
+      user,
+      "updateRound",
+      { method: "PUT", params: { id: round.id }, body: { maxTeams: 4 } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(republish).toHaveBeenCalledTimes(1);
+    expect(republish).toHaveBeenCalledWith(
+      expect.objectContaining({ id: round.id, maxTeams: 4 }),
+    );
+  });
+
+  it("does not republish when the round is Cancelled (409)", async () => {
+    const round = await seedRoundAt("Cancelled");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res } = await measureWrite(
+      user,
+      "updateRound",
+      { method: "PUT", params: { id: round.id }, body: { maxTeams: 4 } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(republish).not.toHaveBeenCalled();
+  });
+});
