@@ -817,3 +817,167 @@ describe("reopenBrief dryRun preview (issue 277)", () => {
     }
   });
 });
+
+// ─── (i) briefCompleteRound contract (todo 5) ─────────────────────────────────
+// Every case runs for BOTH the real path and the ?dryRun=true preview — the two
+// share the unleased preamble (auth, scope, limiter, from-gate, brief-exists
+// gate) and must reject identically.
+
+describe("briefCompleteRound responses (issue 277)", () => {
+  const QUERY_VARIANTS = [
+    ["real", {}],
+    ["preview", { dryRun: "true" }],
+  ] as const;
+
+  it.each(QUERY_VARIANTS)("unauthenticated -> 401 UNAUTHORIZED (%s)", async (_label, query) => {
+    const { round } = await seedRoundAt("Confirmed");
+    const res = await call("briefCompleteRound", null, {
+      method: "POST",
+      params: { id: round.id },
+      query,
+    });
+    expect(res.status).toBe(401);
+    expect(res.jsonBody).toEqual(UNAUTHORIZED);
+  });
+
+  it.each(QUERY_VARIANTS)("Pilot -> 403 FORBIDDEN (%s)", async (_label, query) => {
+    const { round } = await seedRoundAt("Confirmed");
+    const { user } = await makeUser({ roles: ["Pilot"] });
+    const res = await call("briefCompleteRound", user, {
+      method: "POST",
+      params: { id: round.id },
+      query,
+    });
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toEqual(FORBIDDEN);
+  });
+
+  it.each(QUERY_VARIANTS)("Admin on a missing round -> 404 NOT_FOUND (%s)", async (_label, query) => {
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const res = await call("briefCompleteRound", user, {
+      method: "POST",
+      params: { id: randomUUID() },
+      query,
+    });
+    expect(res.status).toBe(404);
+    expect(res.jsonBody).toEqual(NOT_FOUND);
+  });
+
+  it.each(QUERY_VARIANTS)(
+    "RoundsCoord of club B on a club-A round -> 403 SCOPE_FORBIDDEN, round and brief bytes unchanged (%s)",
+    async (_label, query) => {
+      const clubA = randomUUID();
+      const { round } = await seedRoundAt("Confirmed", clubA);
+      const roundBefore = await bytes(`rounds/${round.id}.json`);
+      const briefBefore = await bytes(`round-briefs/${round.id}.json`);
+      const clubB = randomUUID();
+      const { user } = await makeUser({ roles: ["RoundsCoord"], clubId: clubB });
+      const res = await call("briefCompleteRound", user, {
+        method: "POST",
+        params: { id: round.id },
+        query,
+      });
+      expect(res.status).toBe(403);
+      expect(res.jsonBody).toEqual(SCOPE_FORBIDDEN);
+      expect(await bytes(`rounds/${round.id}.json`)).toEqual(roundBefore);
+      expect(await bytes(`round-briefs/${round.id}.json`)).toEqual(briefBefore);
+    },
+  );
+
+  it("saturated own bucket: cross-club coord preview still gets 403, never 429", async () => {
+    // Same shape as todo 4's reopen-preview case: the preview's scope check must
+    // resolve BEFORE the limiter. Hand-built local CallSiteCase — never added to
+    // an evidence file (the scoped issue8EvidenceScopedCases.ts row covers the
+    // real path's ordering).
+    const context = {
+      forbidden: await crossClubCoord(),
+      request: {
+        method: "POST",
+        params: { id: (await roundForOtherClub("Confirmed")).id },
+        query: { dryRun: "true" },
+      },
+    };
+    const row: CallSiteCase = {
+      file: "roundTransitions.ts",
+      handler: "briefCompleteRound",
+      endpoint: "briefCompleteRound",
+      tier: "standard",
+      forbiddenKind: "coord-scope",
+      setup: () => Promise.resolve(context),
+    };
+    resetAllBuckets();
+    await saturateOwnBucket(row, context);
+    const res = await invokeEvidenceHandler(
+      "briefCompleteRound",
+      makeEvidenceRequest(context.forbidden, context.request),
+    );
+    expect(res.status).toBe(403);
+    expect((res.jsonBody as { code?: string } | undefined)?.code).toBe(
+      "FORBIDDEN",
+    );
+    expect(retryAfter(res)).toBeUndefined();
+  });
+
+  it("Admin preview -> 200 { invalidatedSignatureCount: 0 }, round and brief ETags unchanged", async () => {
+    const { round } = await seedRoundAt("Confirmed");
+    const roundEtagBefore = await etag(`rounds/${round.id}.json`);
+    const briefEtagBefore = await etag(`round-briefs/${round.id}.json`);
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const res = await call("briefCompleteRound", user, {
+      method: "POST",
+      params: { id: round.id },
+      query: { dryRun: "true" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.jsonBody).toEqual({ invalidatedSignatureCount: 0 });
+    expect(await etag(`rounds/${round.id}.json`)).toBe(roundEtagBefore);
+    expect(await etag(`round-briefs/${round.id}.json`)).toBe(briefEtagBefore);
+  });
+
+  it.each(QUERY_VARIANTS)("unsafe id -> 400 INVALID_BLOB_PATH (E4) (%s)", async (_label, query) => {
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const res = await call("briefCompleteRound", user, {
+      method: "POST",
+      params: { id: "a@b" },
+      query,
+    });
+    expect(res.status).toBe(400);
+    expect(res.jsonBody).toEqual(INVALID_BLOB_PATH);
+  });
+
+  it.each(QUERY_VARIANTS)("charges briefCompleteRound/standard once (%s)", async (_label, query) => {
+    const { round } = await seedRoundAt("Confirmed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+    const res = await call("briefCompleteRound", user, {
+      method: "POST",
+      params: { id: round.id },
+      query,
+    });
+    expect(res.status).toBe(200);
+    const limiter = vi.mocked(mutationRateLimit);
+    expect(limiter).toHaveBeenCalledTimes(1);
+    expect(limiter.mock.calls[0]?.[2]).toBe("briefCompleteRound");
+    expect(limiter.mock.calls[0]?.[3]).toBe("standard");
+  });
+
+  it("structural: briefCompleteRound passes the preamble check and contains applyRoundWrite(", () => {
+    const body = handlerSource(ROUNDS_MUTATE_SOURCE, "briefCompleteRound");
+    expect(body).toContain("applyRoundWrite(");
+    for (const token of PREAMBLE_TOKENS) {
+      expect(body).not.toContain(token);
+    }
+  });
+
+  it("structural: ROUND_WRITES.briefComplete equals its row", () => {
+    expect(writes?.["briefComplete"]).toEqual({
+      kind: "transition",
+      from: ["Confirmed"],
+      to: "BriefComplete",
+      lease: "roundAndBrief",
+      endpoint: "briefCompleteRound",
+      tier: "standard",
+    });
+  });
+});

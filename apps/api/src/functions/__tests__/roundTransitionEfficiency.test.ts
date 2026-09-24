@@ -452,3 +452,76 @@ describe("round writes - reopenBrief dryRun preview (issue 277)", () => {
     expect(republish).not.toHaveBeenCalled();
   });
 });
+
+// ─── briefCompleteRound (issue 277, todo 5) ───────────────────────────────────
+
+describe("round writes - briefCompleteRound (issue 277)", () => {
+  beforeEach(() => resetAllBuckets());
+
+  it("real path reads rounds/{id}.json twice (pre-read + leased), resolves the caller once, republishes once", async () => {
+    const round = await seedRoundAt("Confirmed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res, reads, callers } = await measureWrite(
+      user,
+      "briefCompleteRound",
+      { method: "POST", params: { id: round.id } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(200);
+
+    // Vacuity guards — same reasoning as the transition budget above.
+    expect(reads).toBeGreaterThanOrEqual(1);
+    expect(callers).toBeGreaterThanOrEqual(1);
+
+    // TWO reads is the target here, not one: the unleased pre-read feeds
+    // assertCanManageRound/assertFrom/gate, then a FRESH read inside the lease
+    // re-checks the status (check-then-act) before the write.
+    expect.soft(reads).toBe(2);
+    expect.soft(callers).toBe(1);
+    expect(republish).toHaveBeenCalledTimes(1);
+    expect(republish).toHaveBeenCalledWith(
+      expect.objectContaining({ id: round.id, status: "BriefComplete" }),
+    );
+  });
+
+  it("preview reads rounds/{id}.json once, resolves the caller once, and never republishes", async () => {
+    const round = await seedRoundAt("Confirmed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res, reads, callers } = await measureWrite(
+      user,
+      "briefCompleteRound",
+      { method: "POST", params: { id: round.id }, query: { dryRun: "true" } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(200);
+
+    expect(reads).toBeGreaterThanOrEqual(1);
+    expect(callers).toBeGreaterThanOrEqual(1);
+
+    expect.soft(reads).toBe(1);
+    expect.soft(callers).toBe(1);
+    expect(republish).not.toHaveBeenCalled();
+  });
+
+  it("a Proposed round 409s and does not republish", async () => {
+    const round = await seedRoundAt("Proposed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res } = await measureWrite(
+      user,
+      "briefCompleteRound",
+      { method: "POST", params: { id: round.id } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(republish).not.toHaveBeenCalled();
+    expect((await readPrivateJson<Round>(`rounds/${round.id}.json`))?.status).toBe(
+      "Proposed",
+    );
+  });
+});
