@@ -147,175 +147,183 @@ async function loadConfig(): Promise<Config> {
 
 // ─── POST /api/rounds ─────────────────────────────────────────────────────────
 
-async function createRound(
+/** The create request body. All fields optional; `scope` validates presence. */
+interface CreateRoundBody {
+  date?: string;
+  siteId?: string;
+  seasonYear?: number;
+  organisingClubId?: string;
+  maxTeams?: number;
+  minimumScore?: number;
+  briefingTime?: string;
+  landByTime?: string;
+  checkInByTime?: string;
+  status?: string;
+}
+
+function createRound(
   req: HttpRequest,
   ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
+  // Per-invocation closure state: the create hooks receive only
+  // { req, ctx, caller }, so the parsed body and resolved organising club
+  // live in variables local to THIS call, captured by the scope/mutate/after
+  // closures below. Module-level state here would race across concurrent
+  // invocations — each call must get its own binding.
+  let body!: CreateRoundBody;
+  let organisingClubId: string | undefined;
 
-  const body = (await req.json()) as {
-    date?: string;
-    siteId?: string;
-    seasonYear?: number;
-    organisingClubId?: string;
-    maxTeams?: number;
-    minimumScore?: number;
-    briefingTime?: string;
-    landByTime?: string;
-    checkInByTime?: string;
-    status?: string;
-  };
+  return applyRoundWrite(req, ctx, "create", {
+    scope: async (c) => {
+      body = (await c.req.json()) as CreateRoundBody;
 
-  const { date, siteId, seasonYear } = body;
-  if (!date || !siteId || !seasonYear) {
-    throw new HttpError(400, "INVALID_BODY", "date, siteId, and seasonYear are required");
-  }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    throw new HttpError(400, "INVALID_DATE", "date must be yyyy-MM-dd");
-  }
-
-  // A non-admin coord may only organise rounds for their own club, and must have one.
-  const isAdmin = caller.roles.includes("Admin");
-  if (!isAdmin && !caller.clubId) {
-    return forbiddenResponse("Your account is not linked to a club");
-  }
-  if (!isAdmin && body.organisingClubId && body.organisingClubId !== caller.clubId) {
-    return forbiddenResponse("You can only create rounds for your own club");
-  }
-  const organisingClubId = isAdmin ? body.organisingClubId : caller.clubId;
-
-  await mutationRateLimit(req, caller, "createRound", "standard");
-
-  // Load site
-  let site: Site;
-  try {
-    const sitePath = `sites/${siteId}.json`;
-    site = await readJson(getPrivateBlobClient(sitePath), SiteSchema, sitePath);
-  } catch (err: unknown) {
-    if ((err as { statusCode?: number }).statusCode === 404) {
-      throw new HttpError(400, "INVALID_BODY", "Site not found");
-    }
-    throw new HttpError(500, "INTERNAL");
-  }
-
-  // Load season (must exist)
-  let season: Season;
-  try {
-    const seasonPath = `seasons/${seasonYear}.json`;
-    season = await readJson(getBlobClient(seasonPath), SeasonSchema, seasonPath);
-  } catch (err: unknown) {
-    if ((err as { statusCode?: number }).statusCode === 404) {
-      throw new HttpError(400, "INVALID_BODY", "Season not found");
-    }
-    throw new HttpError(500, "INTERNAL");
-  }
-
-  let organisingClub: { id: string; name: string } | undefined;
-  if (organisingClubId) {
-    try {
-      const clubPath = `clubs/${organisingClubId}.json`;
-      const club = await readJson(getPrivateBlobClient(clubPath), ClubRefSchema, clubPath);
-      organisingClub = { id: club.id, name: club.name };
-    } catch (err: unknown) {
-      if ((err as { statusCode?: number }).statusCode === 404) {
-        throw new HttpError(400, "CLUB_NOT_FOUND", "Organising club not found");
+      const { date, siteId, seasonYear } = body;
+      if (!date || !siteId || !seasonYear) {
+        throw new HttpError(400, "INVALID_BODY", "date, siteId, and seasonYear are required");
       }
-      throw new HttpError(500, "INTERNAL");
-    }
-  }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        throw new HttpError(400, "INVALID_DATE", "date must be yyyy-MM-dd");
+      }
 
-  const id = randomUUID();
-  // Lifecycle invariant: a round is ALWAYS created Proposed. Accepting any other
-  // status here would let a caller skip the freeze lifecycle (confirm →
-  // brief-complete → lock), so a provided status is honoured only when it
-  // normalizes to Proposed; anything else (or an unknown value) is a 400.
-  if (body.status !== undefined) {
-    let requested: RoundStatus;
-    try {
-      requested = normalizeStatus(body.status);
-    } catch (err: unknown) {
-      const message = (err as { message?: string }).message ?? "Unknown status";
-      return {
-        status: 400,
-        jsonBody: { error: "Invalid status", code: "INVALID_STATUS", detail: message },
-      };
-    }
-    if (requested !== "Proposed") {
-      return {
-        status: 400,
-        jsonBody: {
-          error: "Invalid status",
-          code: "INVALID_STATUS",
-          detail: `Rounds must be created with status Proposed (received ${requested})`,
-        },
-      };
-    }
-  }
-  const round: Round = {
-    id,
-    date,
-    status: "Proposed",
-    isLocked: false,
-    maxTeams: body.maxTeams ?? 8,
-    minimumScore: body.minimumScore ?? 0,
-    site: {
-      id: site.id,
-      name: site.name,
-      parkingW3W: site.parkingW3W,
-      briefingW3W: site.briefingW3W,
-      takeOffW3W: site.takeOffW3W,
+      // A non-admin coord may only organise rounds for their own club, and must have one.
+      const isAdmin = c.caller.roles.includes("Admin");
+      if (!isAdmin && !c.caller.clubId) {
+        // Old message "Your account is not linked to a club"; withErrorHandler
+        // (http.ts:91-101) always dropped it, so the bare 403 is byte-identical.
+        throw new HttpError(403, "FORBIDDEN");
+      }
+      if (!isAdmin && body.organisingClubId && body.organisingClubId !== c.caller.clubId) {
+        // Old message "You can only create rounds for your own club"; likewise
+        // always dropped by withErrorHandler.
+        throw new HttpError(403, "FORBIDDEN");
+      }
+      organisingClubId = isAdmin ? body.organisingClubId : (c.caller.clubId ?? undefined);
     },
-    organisingClub,
-    season: { year: Number(seasonYear) },
-    teams: [],
-  };
+    mutate: async () => {
+      const { date, siteId, seasonYear } = body;
 
-  // Write primary round blob
-  await writePrivateJson(`rounds/${id}.json`, RoundSchema, round);
-
-  // Append round ID to season (with lease for atomicity)
-  try {
-    await withLease(`seasons/${seasonYear}.json`, async (leaseId) => {
-      const seasonPath = `seasons/${seasonYear}.json`;
-      const s = await readJson(getBlobClient(seasonPath), SeasonSchema, seasonPath);
-      if (!s.rounds.includes(id)) {
-        s.rounds.push(id);
+      // Load site
+      let site: Site;
+      try {
+        const sitePath = `sites/${siteId}.json`;
+        site = await readJson(getPrivateBlobClient(sitePath), SiteSchema, sitePath);
+      } catch (err: unknown) {
+        if ((err as { statusCode?: number }).statusCode === 404) {
+          throw new HttpError(400, "INVALID_BODY", "Site not found");
+        }
+        throw new HttpError(500, "INTERNAL");
       }
-      await writeJson(seasonPath, SeasonSchema, s, leaseId);
-    });
-  } catch {
-    // Season blob just checked to exist — this should not fail; best-effort
-    season.rounds.push(id);
-    await writeJson(`seasons/${seasonYear}.json`, SeasonSchema, season);
-  }
 
-  // Update rounds.json index
-  await updateRoundsIndex(round);
+      // Load season (must exist)
+      let season: Season;
+      try {
+        const seasonPath = `seasons/${seasonYear}.json`;
+        season = await readJson(getBlobClient(seasonPath), SeasonSchema, seasonPath);
+      } catch (err: unknown) {
+        if ((err as { statusCode?: number }).statusCode === 404) {
+          throw new HttpError(400, "INVALID_BODY", "Season not found");
+        }
+        throw new HttpError(500, "INTERNAL");
+      }
 
-  // Seed the brief at creation so coordinators land on a populated brief-edit UI.
-  // Best-effort: a failure MUST NOT fail the round create — the brief is
-  // recoverable via lazy-create on first edit/image (T6/T9). ifNoneMatch:"*" is
-  // atomic create-or-skip, so it never clobbers a brief that already exists.
-  try {
-    const brief = await buildInitialBrief(round, {
-      briefingTime: body.briefingTime,
-      checkInByTime: body.checkInByTime,
-      landByTime: body.landByTime,
-    });
-    await writePrivateJson(`round-briefs/${id}.json`, BriefSchema, brief, undefined, {
-      ifNoneMatch: "*",
-    });
-  } catch (briefErr) {
-    ctx.warn(`[createRound:${id}] Eager brief creation failed (recoverable):`, briefErr);
-    getTelemetryClient()?.trackTrace({
-      message: "brief.eagerCreateFailed",
-      properties: { roundId: id },
-    });
-  }
+      let organisingClub: { id: string; name: string } | undefined;
+      if (organisingClubId) {
+        try {
+          const clubPath = `clubs/${organisingClubId}.json`;
+          const club = await readJson(getPrivateBlobClient(clubPath), ClubRefSchema, clubPath);
+          organisingClub = { id: club.id, name: club.name };
+        } catch (err: unknown) {
+          if ((err as { statusCode?: number }).statusCode === 404) {
+            throw new HttpError(400, "CLUB_NOT_FOUND", "Organising club not found");
+          }
+          throw new HttpError(500, "INTERNAL");
+        }
+      }
 
-  return { status: 201, jsonBody: round };
+      const id = randomUUID();
+      // Lifecycle invariant: a round is ALWAYS created Proposed. Accepting any other
+      // status here would let a caller skip the freeze lifecycle (confirm →
+      // brief-complete → lock), so a provided status is honoured only when it
+      // normalizes to Proposed; anything else (or an unknown value) is a 400.
+      if (body.status !== undefined) {
+        let requested: RoundStatus;
+        try {
+          requested = normalizeStatus(body.status);
+        } catch (err: unknown) {
+          const message = (err as { message?: string }).message ?? "Unknown status";
+          throw new HttpError(400, "INVALID_STATUS", message);
+        }
+        if (requested !== "Proposed") {
+          throw new HttpError(
+            400,
+            "INVALID_STATUS",
+            `Rounds must be created with status Proposed (received ${requested})`,
+          );
+        }
+      }
+      const round: Round = {
+        id,
+        date: date!,
+        status: "Proposed",
+        isLocked: false,
+        maxTeams: body.maxTeams ?? 8,
+        minimumScore: body.minimumScore ?? 0,
+        site: {
+          id: site.id,
+          name: site.name,
+          parkingW3W: site.parkingW3W,
+          briefingW3W: site.briefingW3W,
+          takeOffW3W: site.takeOffW3W,
+        },
+        organisingClub,
+        season: { year: Number(seasonYear) },
+        teams: [],
+      };
+
+      // Write primary round blob
+      await writePrivateJson(`rounds/${id}.json`, RoundSchema, round);
+
+      // Append round ID to season (with lease for atomicity)
+      try {
+        await withLease(`seasons/${seasonYear}.json`, async (leaseId) => {
+          const seasonPath = `seasons/${seasonYear}.json`;
+          const s = await readJson(getBlobClient(seasonPath), SeasonSchema, seasonPath);
+          if (!s.rounds.includes(id)) {
+            s.rounds.push(id);
+          }
+          await writeJson(seasonPath, SeasonSchema, s, leaseId);
+        });
+      } catch {
+        // Season blob just checked to exist — this should not fail; best-effort
+        season.rounds.push(id);
+        await writeJson(`seasons/${seasonYear}.json`, SeasonSchema, season);
+      }
+
+      return round;
+    },
+    after: async (round) => {
+      // Seed the brief at creation so coordinators land on a populated brief-edit UI.
+      // Best-effort: a failure MUST NOT fail the round create — the brief is
+      // recoverable via lazy-create on first edit/image (T6/T9). ifNoneMatch:"*" is
+      // atomic create-or-skip, so it never clobbers a brief that already exists.
+      try {
+        const brief = await buildInitialBrief(round, {
+          briefingTime: body.briefingTime,
+          checkInByTime: body.checkInByTime,
+          landByTime: body.landByTime,
+        });
+        await writePrivateJson(`round-briefs/${round.id}.json`, BriefSchema, brief, undefined, {
+          ifNoneMatch: "*",
+        });
+      } catch (briefErr) {
+        ctx.warn(`[createRound:${round.id}] Eager brief creation failed (recoverable):`, briefErr);
+        getTelemetryClient()?.trackTrace({
+          message: "brief.eagerCreateFailed",
+          properties: { roundId: round.id },
+        });
+      }
+    },
+  });
 }
 
 // ─── PUT /api/rounds/{id} ─────────────────────────────────────────────────────

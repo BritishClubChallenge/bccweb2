@@ -39,7 +39,7 @@ import { assertCanManageRound, isCoord } from "./roundAuth.js";
 export type RoundTransitionName = "confirm" | "reopen" | "cancel" | "uncancel";
 
 /** The writes the executor can run; grows beyond the pure four in later todos. */
-export type RoundWriteName = RoundTransitionName;
+export type RoundWriteName = RoundTransitionName | "create";
 
 interface RoundWriteSpecBase {
   /** Rate-limit bucket key suffix — `mutation:{tier}:{endpoint}`. */
@@ -56,8 +56,17 @@ export interface TransitionWriteSpec extends RoundWriteSpecBase {
   readonly lease: "round";
 }
 
-/** Grows a union with EditWriteSpec/CreateWriteSpec in later todos. */
-export type RoundWriteSpec = TransitionWriteSpec;
+/**
+ * The create write. No lease and no storage-error translation: there is no
+ * pre-existing round to lease or 404 on, and `mutate` persists the new record
+ * itself.
+ */
+export interface CreateWriteSpec extends RoundWriteSpecBase {
+  readonly kind: "create";
+}
+
+/** Grows a union with EditWriteSpec in a later todo. */
+export type RoundWriteSpec = TransitionWriteSpec | CreateWriteSpec;
 
 /** Kept exported for the importers that predate ROUND_WRITES. */
 export type RoundTransitionSpec = TransitionWriteSpec;
@@ -83,8 +92,10 @@ const PURE_TRANSITIONS: Record<RoundTransitionName, TransitionWriteSpec> = {
  * const` narrows `from` to e.g. `readonly ["Proposed"]`, and
  * `spec.from.includes(round.status)` below then fails to compile (TS2345).
  */
-export const ROUND_WRITES: Record<RoundWriteName, RoundWriteSpec> =
-  PURE_TRANSITIONS;
+export const ROUND_WRITES: Record<RoundWriteName, RoundWriteSpec> = {
+  ...PURE_TRANSITIONS,
+  create: { kind: "create", endpoint: "createRound", tier: "standard" },
+};
 
 export const ROUND_TRANSITIONS: Record<RoundTransitionName, RoundTransitionSpec> =
   PURE_TRANSITIONS;
@@ -128,6 +139,30 @@ export interface RoundWriteHooks<Extra = undefined> {
   readonly gate?: (c: RoundWriteContext) => void | Promise<void>;
   readonly mutate?: (c: RoundWriteContext) => Extra | Promise<Extra>;
   readonly respond?: (round: Round, extra: Extra) => unknown;
+}
+
+/**
+ * The create context: there is no round id or pre-existing round, so it is the
+ * request-scoped values only. Parsed body values live in the handler's own
+ * closure; the hooks receive just this.
+ */
+export interface CreateContext {
+  readonly req: HttpRequest;
+  readonly ctx: InvocationContext;
+  readonly caller: CallerIdentity;
+}
+
+/**
+ * Hooks for the create write. Unlike the transition hooks, `scope` and
+ * `mutate` are REQUIRED — every real create needs both body validation and the
+ * build-and-persist step. There is no lease, so `mutate` persists the new
+ * record itself and returns it; `after` is best-effort follow-up (eager brief)
+ * that runs after the republish and must never fail the create.
+ */
+export interface CreateHooks {
+  readonly scope: (c: CreateContext) => void | Promise<void>;
+  readonly mutate: (c: CreateContext) => Promise<Round>;
+  readonly after?: (round: Round, c: CreateContext) => void | Promise<void>;
 }
 
 /**
@@ -199,18 +234,23 @@ function assertFrom(spec: TransitionWriteSpec, round: Round): void {
 }
 
 /**
- * Republish-and-respond. Outside the lease AND outside every try/catch: a
- * failing republish must fall through withErrorHandler's generic catch
+ * Republish. Outside the lease AND outside every try/catch: a failing
+ * republish must fall through withErrorHandler's generic catch
  * (http.ts:130-137) exactly as it does today, not be remapped to
  * HttpError(500, "INTERNAL") by the translation — the two produce different
- * response bodies.
+ * response bodies. This is the ONLY `updateRoundsIndex` call site.
  */
+async function republish(round: Round): Promise<void> {
+  await updateRoundsIndex(round);
+}
+
+/** Republish, then shape the 200 transition response. */
 async function republishAndRespond<Extra>(
   round: Round,
   hooks: RoundWriteHooks<Extra> | undefined,
   extra: Extra
 ): Promise<HttpResponseInit> {
-  await updateRoundsIndex(round);
+  await republish(round);
   return {
     status: 200,
     jsonBody: hooks?.respond ? hooks.respond(round, extra) : round,
@@ -228,7 +268,7 @@ async function republishAndRespond<Extra>(
 async function runRoundWrite<Extra>(
   req: HttpRequest,
   ctx: InvocationContext,
-  spec: RoundWriteSpec,
+  spec: TransitionWriteSpec,
   hooks: RoundWriteHooks<Extra> | undefined
 ): Promise<HttpResponseInit> {
   const id = requireId(req);
@@ -276,18 +316,67 @@ async function runRoundWrite<Extra>(
 }
 
 /**
+ * The `create` write: requireCoordCaller -> scope -> chargeLimiter -> mutate
+ * (which builds AND persists the new round, returning it) -> republish ->
+ * after -> respond (201). No id guard, no lease and no storage-error
+ * translation: there is no pre-existing round to lease or 404 on, and the
+ * hook's own throws (HttpError for the expected failures, anything else
+ * falling through to the generic 500) are already the correct response.
+ */
+async function runCreateWrite(
+  req: HttpRequest,
+  ctx: InvocationContext,
+  spec: CreateWriteSpec,
+  hooks: CreateHooks
+): Promise<HttpResponseInit> {
+  const caller = await requireCoordCaller(req);
+  const c: CreateContext = { req, ctx, caller };
+  await hooks.scope(c);
+  await chargeLimiter(req, caller, spec);
+  const round = await hooks.mutate(c);
+  await republish(round);
+  if (hooks.after) await hooks.after(round, c);
+  return { status: 201, jsonBody: round };
+}
+
+/**
  * Run one table-driven round write end to end: auth, scope, rate limit,
  * status gate, leased write, and the public-index republish. Returns the
  * 200 response; every rejection is a thrown `HttpError`.
  *
  * Response codes, in the order they can fire: 400 (no id) → 401 → 403 (coarse
  * role) → 404 (no such round) → 403 (wrong club) → 429 → 409 (wrong status).
+ *
+ * The `"create"` overload takes the required `CreateHooks` and returns 201;
+ * the general overload covers the rest of `RoundWriteName`. Overload
+ * resolution on the `name` literal picks the right hook type at call sites.
  */
+export function applyRoundWrite(
+  req: HttpRequest,
+  ctx: InvocationContext,
+  name: "create",
+  hooks: CreateHooks
+): Promise<HttpResponseInit>;
+export function applyRoundWrite<Extra = undefined>(
+  req: HttpRequest,
+  ctx: InvocationContext,
+  name: Exclude<RoundWriteName, "create">,
+  hooks?: RoundWriteHooks<Extra>
+): Promise<HttpResponseInit>;
 export function applyRoundWrite<Extra = undefined>(
   req: HttpRequest,
   ctx: InvocationContext,
   name: RoundWriteName,
-  hooks?: RoundWriteHooks<Extra>
+  hooks?: RoundWriteHooks<Extra> | CreateHooks
 ): Promise<HttpResponseInit> {
-  return runRoundWrite(req, ctx, ROUND_WRITES[name], hooks);
+  const spec = ROUND_WRITES[name];
+  if (spec.kind === "create") {
+    return runCreateWrite(req, ctx, spec, hooks as CreateHooks);
+  }
+  return runRoundWrite(
+    req,
+    ctx,
+    spec,
+    hooks as RoundWriteHooks<Extra> | undefined
+  );
 }

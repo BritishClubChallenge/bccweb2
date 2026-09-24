@@ -428,3 +428,102 @@ describe("createRound responses (issue 277)", () => {
     });
   });
 });
+
+// ─── (f) createRound concurrency regression (todo 2 review fix) ───────────────
+
+/**
+ * A controllable deferred so the test can hold one invocation's `scope` open
+ * while another runs to completion — the exact interleave that exposes shared
+ * module-level hook state.
+ */
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+describe("createRound concurrent invocations stay isolated (issue 277)", () => {
+  it("two interleaved creates each persist their OWN body, not the other's", async () => {
+    // Two fixtures → two distinct existing sites (and the shared season year).
+    const fixtureA = await makeRound();
+    const fixtureB = await makeRound();
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const bodyA = {
+      date: "2026-06-01",
+      siteId: fixtureA.site.id,
+      seasonYear: fixtureA.season.year,
+    };
+    const bodyB = {
+      date: "2026-07-02",
+      siteId: fixtureB.site.id,
+      seasonYear: fixtureB.season.year,
+    };
+
+    // Park A INSIDE the rate limiter — after its scope has assigned body=A but
+    // before mutate reads it. The limiter is the one await between scope and
+    // mutate that we can intercept (it is the wrapped mock above). We identify
+    // A by a unique x-forwarded-for marker; B's limiter call passes straight
+    // through. Frozen this way, B's scope overwrites the shared module-level
+    // body (the bug) before A's mutate reads it — so A would build round A from
+    // B's body. With per-invocation closures, A's own binding is untouched.
+    const markerA = `${randomUUID()}.raceA`;
+    const aInLimiter = deferred<void>();
+    const releaseA = deferred<void>();
+    const limiter = vi.mocked(mutationRateLimit);
+    const realLimiter = limiter.getMockImplementation()!;
+    limiter.mockImplementation(async (req, caller, endpoint, tier) => {
+      if (req.headers.get("x-forwarded-for") === markerA) {
+        aInLimiter.resolve();
+        await releaseA.promise;
+      }
+      return realLimiter(req, caller, endpoint, tier);
+    });
+
+    try {
+      const reqA = makeAuthRequest(user.id, user.email, {
+        method: "POST",
+        body: bodyA,
+        headers: { "x-forwarded-for": markerA },
+      });
+      const reqB = makeAuthRequest(user.id, user.email, {
+        method: "POST",
+        body: bodyB,
+        headers: { "x-forwarded-for": `${randomUUID()}.raceB` },
+      });
+
+      // Start A (do not await); wait until it is parked in the limiter — its
+      // scope has already assigned body=A.
+      const resAPromise = invoke("createRound", reqA);
+      await aInLimiter.promise;
+      // Run B to FULL completion while A is frozen — under the bug B's scope
+      // overwrites the shared body to B.
+      const resB = await invoke("createRound", reqB);
+      // Release A; its mutate now reads `body`.
+      releaseA.resolve();
+      const resA = await resAPromise;
+
+      expect(resB.status).toBe(201);
+      expect(resA.status).toBe(201);
+
+      const roundA = resA.jsonBody as Round;
+      const roundB = resB.jsonBody as Round;
+      // Each round must carry ITS OWN request's site/date — never the sibling's.
+      expect(roundA.site.id).toBe(bodyA.siteId);
+      expect(roundA.date).toBe(bodyA.date);
+      expect(roundB.site.id).toBe(bodyB.siteId);
+      expect(roundB.date).toBe(bodyB.date);
+      // And the persisted blobs agree with what was returned.
+      const persistedA = await readPrivateJson<Round>(`rounds/${roundA.id}.json`);
+      const persistedB = await readPrivateJson<Round>(`rounds/${roundB.id}.json`);
+      expect(persistedA?.site.id).toBe(bodyA.siteId);
+      expect(persistedA?.date).toBe(bodyA.date);
+      expect(persistedB?.site.id).toBe(bodyB.siteId);
+      expect(persistedB?.date).toBe(bodyB.date);
+    } finally {
+      limiter.mockImplementation(realLimiter);
+    }
+  });
+});
