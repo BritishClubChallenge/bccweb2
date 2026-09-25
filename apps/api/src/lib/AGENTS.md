@@ -134,61 +134,89 @@ don't re-read the source.
 ## roundTransitions.ts — the round write table and executor
 
 - `ROUND_WRITES: Record<RoundWriteName, RoundWriteSpec>` is the SOURCE OF TRUTH for the
-  eight routed round writes. Every row carries the rate-limit `endpoint` + `tier`
+  nine routed round writes. Every row carries the rate-limit `endpoint` + `tier`
   (`__tests__/issue8EvidenceHarness.ts` derives its evidence rows from the table, so these
   ARE the audited call sites) and a `kind`:
   - `transition` (`from[]`, `to`, `lease`): `confirm`/`reopen`/`cancel`/`uncancel` and
-    `briefComplete` (`lease:"roundAndBrief"`) and `unlock` (`lease:"pureTrackEchoes"`);
+    `briefComplete` (`lease:"roundAndBrief"`) and `unlock` (`lease:"pureTrackEchoes"`)
+    and `lock` (`lease:"roundAndBriefRollback"`, whose row also declares `persistFailure`);
     the four pure rows use `lease:"round"`.
   - `edit` (`lease:"round"`, no `from`/`to`): `update`; its `gate` hook carries the
     lifecycle checks instead of `assertFrom`.
   - `create` (no lease): `create`.
   `ROUND_TRANSITIONS` survives as a legacy export of the same four pure row objects (one
-  shared `PURE_TRANSITIONS` object, so they can't drift). `lockRound`/`completeRound`
-  stay bespoke in `functions/roundsMutate.ts`. Don't use `as const satisfies` on the table:
+  shared `PURE_TRANSITIONS` object, so they can't drift). `completeRound` stays bespoke
+  in `functions/roundsMutate.ts` (#276). Don't use `as const satisfies` on the table:
   it narrows `from` and breaks `spec.from.includes(...)` (TS2345).
 - `applyRoundWrite(req, ctx, name, hooks?)` dispatches on the row: `kind:"create"` →
   `runCreateWrite`; transition + `roundAndBrief` → `runRoundAndBriefWrite`; transition +
+  `roundAndBriefRollback` → `runRoundAndBriefRollbackWrite`; transition +
   `pureTrackEchoes` → `runPureTrackEchoesWrite`; everything else (plain `round` lease) →
   `runRoundWrite`. The `"create"` overload takes required `CreateHooks` and returns 201;
   the rest return 200. Every rejection is a thrown `HttpError`, so handlers are one-liners.
   Codes fire in the order 400 (no id) → 401 → 403 (coarse role) → 404 → 403 (wrong club)
-  → 429 → 409.
+  → 429 → 409. Lock can also answer `500 BRIEF_PERSIST_FAILED` (its row's
+  `persistFailure`) for any non-`HttpError` inside its lease.
 - Hook slots (`RoundWriteHooks<Extra>`, all optional):
   - `scope`: 403/400-class checks needing the round or body. Runs after
     `assertCanManageRound`, BEFORE the limiter. Only inside `runRoundWrite`'s leased path is
     a non-`HttpError` throw wrapped in `UntranslatedHookError`, so `translateStorageError`
     rethrows the original instead of remapping it to `500 INTERNAL`.
-  - `gate`: 409-class checks, after the limiter and after `assertFrom`.
+  - `gate`: 409-class checks, after the limiter and after `assertFrom`. For `roundAndBrief`
+    and `roundAndBriefRollback` it runs pre-lease on the unleased pre-read and may stash
+    per-invocation data for later hooks (brief-complete: the pre-read brief; lock: the
+    pilot Snapshots and the lock candidate). Checks that need the LEASED brief throw from
+    `mutate` before it changes anything (brief-complete's `ROSTER_INCOMPLETE`; lock's
+    `BRIEF_HASH_MISMATCH`, `SIGNATURE_LEDGER_UNAVAILABLE`, `SIGNATURES_INCOMPLETE`).
   - `preview`: only when `?dryRun=true`; returns the 200 body, never persists or
     republishes.
   - `mutate`: in-memory changes under the lease; returns `Extra`. Its context's `brief`
-    field is the fresh LEASED brief, set only for `roundAndBrief`/`pureTrackEchoes`.
+    field is the fresh LEASED brief, set only for `roundAndBrief`/`roundAndBriefRollback`/`pureTrackEchoes`.
+  - `afterCommit`: runs after the lease is released and before the republish, on the
+    committed round (the object then republished and returned), which it may refresh. The
+    executor contains any throw via `ctx.error`, so it never fails the write or skips the
+    republish. It never runs for rejections or previews.
   - `respond`: shapes the success body (default: the round).
   `CreateHooks` differ: `scope` and `mutate` are required, `mutate` builds AND persists the
   new round, and `after` is best-effort follow-up (eager brief) run after the republish.
+  There are three post-commit shapes: create's `after` (after the republish, not
+  contained); `afterCommit` (before the republish, contained); complete's post-response
+  recompute (fire-and-forget, still bespoke).
 - Per-strategy order:
   - `round`: requireId → requireCoordCaller → either preview (unleased read →
     assertCanManageRound → scope → limiter → assertFrom (transitions) → gate → preview) or
     `withPrivateLease{ read → assertCanManageRound → scope → limiter → assertFrom → gate →
-    mutate → status = to (transitions) → write }` → translate → republish → respond. The
+    mutate → status = to (transitions) → write }` → translate → afterCommit → republish →
+    respond. The
     round is read and the caller resolved exactly once.
   - `roundAndBrief` (brief-complete): requireId → requireCoordCaller → unleased pre-read →
     assertCanManageRound → scope → limiter → assertFrom → gate → [preview returns here] →
     `withRoundAndBriefLease{ read round → assertFrom again → read brief → mutate →
-    status = to → write BRIEF then round }` → translate → republish → respond. Brief first
+    status = to → write BRIEF then round }` → translate → afterCommit → republish → respond.
+    Brief first
     so a crash never leaves a BriefComplete round over an unfrozen brief.
   - `pureTrackEchoes` (unlock): requireId → requireCoordCaller → unleased pre-read →
     assertCanManageRound → scope → limiter → `mutatePureTrackEchoes(id, cb{ assertFrom →
-    gate → mutate → status = to })` → republish → respond. The call sits OUTSIDE
+    gate → mutate → status = to })` → afterCommit → republish → respond. The call sits OUTSIDE
     `translateStorageError`, so a plain storage failure reaches `withErrorHandler`'s generic
     catch unchanged, as the pre-#277 handler did. An uncaptured round is a defensive 500.
+  - `roundAndBriefRollback` (lock): requireId → requireCoordCaller → unleased pre-read →
+    assertCanManageRound → scope → limiter → assertFrom → gate → `withRoundAndBriefLease{
+    read round → assertFrom again → read brief → capture its raw bytes → mutate →
+    status = to → write BRIEF then round; if the round write fails, restore the raw brief
+    bytes under the brief lease (a failed restore emits
+    `puretrack.crossBlobReconcileRequired` with `operation` = the row key) and rethrow }` →
+    non-`HttpError` → `persistFailure` (NOT `translateStorageError`) → afterCommit →
+    republish → respond. No preview path. The callback may re-run when a storage 409/412
+    escapes it (`withPrivateLeaseRetry`), so `mutate` must be re-entrant.
   - `create`: requireCoordCaller → scope → limiter → mutate → republish → after → 201. No
     id guard, lease or translation.
 - Why the pre-reads differ. Brief-complete keeps an unleased pre-read so preview and real
   path share one status gate and can fail before entering the lease; the real path then
   re-reads and re-runs `assertFrom` inside the lease (check-then-act, the status may move
-  between pre-read and acquisition). Unlock's pre-read exists ONLY to feed
+  between pre-read and acquisition). Lock's pre-read feeds the scope check, the limiter,
+  the from-gate and the gate's pilot-Snapshot fan-out, which must stay outside the lease;
+  its leased re-read re-checks the status, as brief-complete's does. Unlock's pre-read exists ONLY to feed
   `assertCanManageRound` before the limiter: `mutatePureTrackEchoes`
   (`lib/puretrackStatus.ts`) owns the whole read/clone/lease/write/rollback cycle and does
   its own read, so the one `assertFrom` runs inside its callback. The asymmetry is
@@ -209,7 +237,10 @@ don't re-read the source.
 - **Single-occurrence invariant**: `roundTransitions.ts` contains exactly one literal each
   of `mutationRateLimit(req, caller, spec.endpoint, spec.tier)`, `getCallerIdentity(`,
   `updateRoundsIndex(`, `"Round not found"` and `"MISSING_ROUND_ID"`;
-  `functions/__tests__/roundWriteContract.test.ts` string-counts them. Every strategy
+  and exactly one `"puretrack.crossBlobReconcileRequired"` (the rollback runner);
+  `roundsMutate.ts` holds none of lock's lease or rollback code (`withRoundAndBriefLease(`,
+  `downloadToBuffer` and `crossBlobReconcileRequired` are absent).
+  `functions/__tests__/roundWriteContract.test.ts` pins both. Every strategy
   funnels through `republish` (called by `republishAndRespond`, or directly by create),
   outside the lease and every try/catch, so a failing republish reaches the generic catch.
   A routed handler must NOT call `updateRoundsIndex` itself.
@@ -225,18 +256,29 @@ don't re-read the source.
     `400 INVALID_BLOB_PATH` (was `500 INTERNAL` via the deleted `assertManageableRound`)
     on `update`, `briefComplete` (+preview), `unlock` and reopen's preview, matching the
     pure transitions.
+- **Accepted deviations from lock's pre-#275 behaviour (L1-L4)**:
+  - L1: the status 409 now carries `detail` (`Expected status BriefComplete, got <status>`,
+    via `assertFrom`/`expectedStatusDetail`); the old body's detail was normalised away.
+  - L2: race-only. The in-lease status re-check's detail is `expectedStatusDetail(...)`
+    instead of `"Round status changed concurrently"`; still `409 CONFLICT`.
+  - L3: a route id rejected by `assertSafeBlobPath` now returns `400 INVALID_BLOB_PATH`
+    (was `500 INTERNAL` from lockRound's catch-all pre-read), matching E4.
+  - L4: a throw from post-commit work now returns 200, still republishes and logs via
+    `ctx.error` (was a 500 that skipped the republish). Reachable only by a synchronous
+    throw; every real post-commit callee is `async` and already caught.
 - **#293 applies only to the `round` strategy.** There, rejected requests (403/429/409)
   contend for the round lease and `withPrivateLease` does NOT retry, so a lost race escapes
   as a non-404 non-`HttpError` and `translateStorageError` maps it to `500 INTERNAL`.
   `withRoundAndBriefLease` nests two `withPrivateLeaseRetry` calls, which retry 409/412
-  with backoff (`blob.ts:286-304,464-473`), so brief-complete doesn't pay this cost; unlock
+  with backoff (`blob.ts:286-304,464-473`), so brief-complete and lock don't pay this cost; unlock
   delegates its lease to `mutatePureTrackEchoes`. Making `round` acquisition retry without
   re-charging the limiter is [#293](https://github.com/BritishClubChallenge/bccweb2/issues/293).
-- Adding a write (#275 lock, #276 complete): add a `RoundWriteName`, one `ROUND_WRITES`
-  row and the handler's hooks, reusing the shared preamble, translation, limiter and
-  republish. Only if its lease semantics fit none of the three strategies (lock's long
-  snapshot work may want a renewing lease) does it need a new strategy branch in
-  `applyRoundWrite`; the table and hook shape stay the same.
+- Adding a write (#276 complete): add a `RoundWriteName`, one `ROUND_WRITES` row and the
+  handler's hooks, reusing the shared preamble, translation, limiter and republish.
+  Complete holds a single renewing round lease (`withPrivateLeaseRenewing`) and fires its
+  season recompute after the response without awaiting it. That fits none of the current
+  strategies, and `afterCommit` is awaited before the republish, so #276 decides its own
+  strategy branch; the table and hook shape stay the same.
 - `expectedStatusDetail(from, actual)` — the exact 409 detail string
   (`Expected status X or Y, got Z`). Its only call site is `assertFrom`, which the preview
   and real paths share, so the two can't drift; it stays exported for tests.

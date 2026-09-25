@@ -504,7 +504,9 @@ itself could not be fully verified:
 
 - `puretrack.crossBlobReconcileRequired` — a round/brief cross-blob write rolled back
   (e.g. during lock) but the compensating write may not have fully reconciled; emitted from
-  `apps/api/src/lib/puretrackStatus.ts` and `apps/api/src/functions/roundsMutate.ts`.
+  `apps/api/src/lib/puretrackStatus.ts` (PureTrack echo mutations such as unlock; no `operation`
+  property) and `apps/api/src/lib/roundTransitions.ts` (the lock commit's brief rollback,
+  `operation: "lock"`).
 - `puretrack.orphanRecoveryRequired` — a PureTrack group was created upstream but the local
   record of it could not be confirmed/cleaned up (e.g. the delete-then-create replace step
   partially succeeded); emitted from `apps/api/src/lib/puretrackApi.ts`.
