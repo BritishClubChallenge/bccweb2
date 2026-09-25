@@ -1127,16 +1127,58 @@ describe("unlockRound responses (issue 277)", () => {
     expect(ROUNDS_MUTATE_SOURCE).not.toContain("assertManageableRound");
   });
 
-  it("structural: ROUND_WRITES has exactly the eight final keys", () => {
+  it("structural: ROUND_WRITES has exactly the nine keys (#276 adds complete)", () => {
     expect(Object.keys(writes ?? {}).sort()).toEqual([
       "briefComplete",
       "cancel",
       "confirm",
       "create",
+      "lock",
       "reopen",
       "uncancel",
       "unlock",
       "update",
     ]);
+  });
+});
+
+// ─── (k) lockRound on the round write table (issue 275, red-first) ────────────
+
+describe("lockRound on the round write table (issue 275)", () => {
+  it("k1 ROUND_WRITES.lock equals its row, persistFailure included", () => {
+    expect(writes?.["lock"]).toEqual({
+      kind: "transition",
+      from: ["BriefComplete"],
+      to: "Locked",
+      lease: "roundAndBriefRollback",
+      endpoint: "lockRound",
+      tier: "heavy",
+      persistFailure: {
+        code: "BRIEF_PERSIST_FAILED",
+        detail:
+          "Failed to persist the brief while locking — the round remains BriefComplete; reopen and re-complete before retrying the lock",
+      },
+    });
+  });
+
+  it("k2 lockRound delegates to applyRoundWrite and holds no preamble tokens", () => {
+    const body = handlerSource(ROUNDS_MUTATE_SOURCE, "lockRound");
+    expect(body).toContain("applyRoundWrite(");
+    for (const token of PREAMBLE_TOKENS) {
+      expect(body).not.toContain(token);
+    }
+  });
+
+  it("k3 roundsMutate.ts holds none of lock's lease or rollback code", () => {
+    expect(ROUNDS_MUTATE_SOURCE).not.toContain("withRoundAndBriefLease(");
+    expect(ROUNDS_MUTATE_SOURCE).not.toContain("downloadToBuffer");
+    expect(ROUNDS_MUTATE_SOURCE).not.toContain("crossBlobReconcileRequired");
+  });
+
+  it("k4 roundTransitions.ts contains exactly one puretrack.crossBlobReconcileRequired", () => {
+    expect(
+      ROUND_TRANSITIONS_SOURCE.split('"puretrack.crossBlobReconcileRequired"')
+        .length - 1,
+    ).toBe(1);
   });
 });
