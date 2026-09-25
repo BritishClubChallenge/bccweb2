@@ -16,9 +16,12 @@
  * `lockRound`/`completeRound` remain bespoke in `functions/roundsMutate.ts`
  * (#275 / #276).
  *
- * Ordering: `applyRoundWrite` reads `rounds/{id}.json` ONCE and resolves the
- * caller ONCE, which is why `mutationRateLimit` runs INSIDE the lease. See the
- * comment at `chargeLimiter` before moving it.
+ * Ordering: the read/limiter pattern is PER-STRATEGY, not executor-wide. Only
+ * the plain `round` strategy reads `rounds/{id}.json` once, inside its lease,
+ * and runs `mutationRateLimit` there too. `roundAndBrief` and
+ * `pureTrackEchoes` pre-read unleased (charging the limiter in the preamble)
+ * and read again under their leases; `create` reads no existing round and
+ * takes no lease. See the comment at `chargeLimiter` before moving it.
  */
 
 import type {
