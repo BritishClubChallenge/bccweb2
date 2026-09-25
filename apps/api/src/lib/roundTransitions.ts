@@ -1,27 +1,29 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
 /**
- * The round write TABLE and its EXECUTOR (issues #274 / #277).
+ * The round write TABLE and its EXECUTOR (issues #274 / #277 / #275).
  *
  * `ROUND_WRITES` is the state machine for the round writes routed here: each
  * row declares the transition's `from`/`to`, the `lease` strategy, and the
  * rate-limit `endpoint`/`tier`, so a converted handler in
  * `functions/roundsMutate.ts` is a one-liner over `applyRoundWrite`. The shared
  * pieces — id guard, caller preamble, fine scope check, limiter, storage-error
- * translation and the public-index republish — each exist exactly once below.
+ * translation, post-commit follow-up and the public-index republish — each
+ * exist exactly once below.
  *
  * Todo 1 of #277 covers the four PURE status transitions (confirm / reopen /
- * cancel / uncancel): the whole mutation is `round.status = to`. Writes that do
- * more (create, update, brief-complete, unlock) have since joined the table;
- * `lockRound`/`completeRound` remain bespoke in `functions/roundsMutate.ts`
- * (#275 / #276).
+ * cancel / uncancel): the whole mutation is `round.status = to`. Nine writes
+ * are now routed, including lock (#275) on the `roundAndBriefRollback`
+ * strategy; `completeRound` remains bespoke in `functions/roundsMutate.ts`
+ * (#276).
  *
  * Ordering: the read/limiter pattern is PER-STRATEGY, not executor-wide. Only
  * the plain `round` strategy reads `rounds/{id}.json` once, inside its lease,
- * and runs `mutationRateLimit` there too. `roundAndBrief` and
- * `pureTrackEchoes` pre-read unleased (charging the limiter in the preamble)
- * and read again under their leases; `create` reads no existing round and
- * takes no lease. See the comment at `chargeLimiter` before moving it.
+ * and runs `mutationRateLimit` there too. `roundAndBrief`,
+ * `roundAndBriefRollback` and `pureTrackEchoes` pre-read unleased (charging
+ * the limiter in the preamble) and read again under their leases; `create`
+ * reads no existing round and takes no lease. See the comment at
+ * `chargeLimiter` before moving it.
  */
 
 import type {
@@ -32,23 +34,25 @@ import type {
 import type { CallerIdentity, Round, RoundBrief, RoundStatus } from "@bccweb/types";
 import { BriefSchema, RoundSchema } from "@bccweb/schemas";
 import { getCallerIdentity } from "./auth.js";
-import { getPrivateBlobClient, withPrivateLease, withRoundAndBriefLease } from "./blob.js";
+import { getPrivateBlobClient, getPrivateBlockBlobClient, withPrivateLease, withRoundAndBriefLease } from "./blob.js";
 import { readJson, writePrivateJson } from "./blobJson.js";
 import { HttpError } from "./http.js";
 import { mutationRateLimit, type MutationRateLimitTier } from "./rateLimit.js";
 import { mutatePureTrackEchoes } from "./puretrackStatus.js";
 import { updateRoundsIndex } from "./recompute.js";
 import { assertCanManageRound, isCoord } from "./roundAuth.js";
+import { getTelemetryClient } from "./telemetry.js";
 
 export type RoundTransitionName = "confirm" | "reopen" | "cancel" | "uncancel";
 
-/** The writes the executor can run; grows beyond the pure four in later todos. */
+/** The writes the executor can run (`complete` joins in #276). */
 export type RoundWriteName =
   | RoundTransitionName
   | "create"
   | "update"
   | "briefComplete"
-  | "unlock";
+  | "unlock"
+  | "lock";
 
 interface RoundWriteSpecBase {
   /** Rate-limit bucket key suffix — `mutation:{tier}:{endpoint}`. */
@@ -84,8 +88,25 @@ export interface EditWriteSpec extends RoundWriteSpecBase {
   readonly lease: "round";
 }
 
-/** The full write-spec union (all eight rows have landed). */
-export type RoundWriteSpec = TransitionWriteSpec | CreateWriteSpec | EditWriteSpec;
+/**
+ * A transition committed under BOTH leases with a compensating brief rollback
+ * (lock). `persistFailure` is the row's declared response to ANY non-HttpError
+ * raised inside the lease; it replaces translateStorageError for this strategy.
+ */
+export interface RollbackTransitionWriteSpec extends RoundWriteSpecBase {
+  readonly kind: "transition";
+  readonly from: readonly RoundStatus[];
+  readonly to: RoundStatus;
+  readonly lease: "roundAndBriefRollback";
+  readonly persistFailure: { readonly code: string; readonly detail: string };
+}
+
+/** The full write-spec union. */
+export type RoundWriteSpec =
+  | TransitionWriteSpec
+  | RollbackTransitionWriteSpec
+  | CreateWriteSpec
+  | EditWriteSpec;
 
 /** Kept exported for the importers that predate ROUND_WRITES. */
 export type RoundTransitionSpec = TransitionWriteSpec;
@@ -136,6 +157,19 @@ export const ROUND_WRITES: Record<RoundWriteName, RoundWriteSpec> = {
     endpoint: "unlockRound",
     tier: "standard",
   },
+  lock: {
+    kind: "transition",
+    from: ["BriefComplete"],
+    to: "Locked",
+    lease: "roundAndBriefRollback",
+    endpoint: "lockRound",
+    tier: "heavy",
+    persistFailure: {
+      code: "BRIEF_PERSIST_FAILED",
+      detail:
+        "Failed to persist the brief while locking — the round remains BriefComplete; reopen and re-complete before retrying the lock",
+    },
+  },
 };
 
 export const ROUND_TRANSITIONS: Record<RoundTransitionName, RoundTransitionSpec> =
@@ -170,12 +204,13 @@ export interface RoundWriteContext {
   readonly id: string;
   readonly round: Round;
   /**
-   * The FRESH, leased brief read — populated ONLY by the `roundAndBrief` and
-   * `pureTrackEchoes` lease strategies. `roundAndBrief` sets it solely on the
-   * `mutate` context; `pureTrackEchoes` builds one context for its whole
-   * in-callback chain, so its `gate` sees the leased brief too. Always
-   * `undefined` for `round`-lease writes and on every preview path (the
-   * preview works on the handler's own unleased pre-read instead).
+   * The FRESH, leased brief read — populated ONLY by the `roundAndBrief`,
+   * `roundAndBriefRollback` and `pureTrackEchoes` lease strategies.
+   * `roundAndBrief` and `roundAndBriefRollback` set it solely on the `mutate`
+   * context; `pureTrackEchoes` builds one context for its whole in-callback
+   * chain, so its `gate` sees the leased brief too. Always `undefined` for
+   * `round`-lease writes and on every preview path (the preview works on the
+   * handler's own unleased pre-read instead).
    */
   readonly brief?: RoundBrief;
 }
@@ -190,12 +225,24 @@ export interface RoundWriteContext {
  *   non-`HttpError` throw is wrapped in `UntranslatedHookError` so translation
  *   rethrows it as-is.
  * - `gate`: 409-class checks, run after the limiter and after the transition
- *   from-gate.
+ *   from-gate. For `roundAndBrief`/`roundAndBriefRollback` it runs pre-lease on
+ *   the unleased pre-read and may stash per-invocation data for later hooks:
+ *   brief-complete stashes the pre-read brief, and lock stashes the pilot
+ *   Snapshots and the lock candidate. Checks that need the LEASED brief throw
+ *   from `mutate` before it changes anything: brief-complete's
+ *   `ROSTER_INCOMPLETE`, and lock's `BRIEF_HASH_MISMATCH`,
+ *   `SIGNATURE_LEDGER_UNAVAILABLE` and `SIGNATURES_INCOMPLETE`.
  * - `preview`: honoured only when `req.query.get("dryRun") === "true"`. Runs
  *   on an UNLEASED pre-read (readRoundTranslated -> assertCanManageRound ->
  *   scope -> chargeLimiter -> assertFrom -> gate), returns the 200 body
  *   verbatim, and never persists or republishes.
  * - `mutate`: in-memory changes under the lease; returns `Extra`.
+ * - `afterCommit`: runs after the lease is released and BEFORE the republish,
+ *   on the committed round — the object that is then republished and returned,
+ *   so the hook may refresh fields on it. The executor contains any throw via
+ *   `ctx.error`, so it can never fail the write or skip the republish. It never
+ *   runs for rejections or previews. It differs from create's `after`, which
+ *   runs after the republish and is not contained.
  * - `respond`: shapes the success body; defaults to the round.
  */
 export interface RoundWriteHooks<Extra = undefined> {
@@ -203,6 +250,7 @@ export interface RoundWriteHooks<Extra = undefined> {
   readonly gate?: (c: RoundWriteContext) => void | Promise<void>;
   readonly preview?: (c: RoundWriteContext) => unknown;
   readonly mutate?: (c: RoundWriteContext) => Extra | Promise<Extra>;
+  readonly afterCommit?: (c: RoundWriteContext) => void | Promise<void>;
   readonly respond?: (round: Round, extra: Extra) => unknown;
 }
 
@@ -287,8 +335,9 @@ async function chargeLimiter(
   // DELIBERATELY INSIDE THE LEASE in the `round` strategy (its ONLY call
   // site there) — do not hoist this into the handler. The other strategies
   // call it from their UNLEASED preambles instead (see runRoundAndBriefWrite /
-  // runPureTrackEchoesWrite): they read the round before the lease, so the
-  // scope check and the limiter both resolve pre-lease there.
+  // runRoundAndBriefRollbackWrite / runPureTrackEchoesWrite): they read the
+  // round before the lease, so the scope check and the limiter both resolve
+  // pre-lease there.
   // rateLimit.ts:138-164 requires the scope check to resolve BEFORE the
   // limiter ("a forbidden caller must get 403, never 429"), and the scope
   // check needs the round. Reading the round once means the scope check
@@ -301,7 +350,10 @@ async function chargeLimiter(
 }
 
 /** The 409 status gate for transitions. */
-function assertFrom(spec: TransitionWriteSpec, round: Round): void {
+function assertFrom(
+  spec: TransitionWriteSpec | RollbackTransitionWriteSpec,
+  round: Round
+): void {
   if (!spec.from.includes(round.status)) {
     throw new HttpError(
       409,
@@ -322,16 +374,31 @@ async function republish(round: Round): Promise<void> {
   await updateRoundsIndex(round);
 }
 
-/** Republish, then shape the 200 transition response. */
+/**
+ * The shared post-commit tail: afterCommit (contained) -> republish (outside
+ * every try/catch) -> respond (200). The try/catch wraps ONLY the `afterCommit`
+ * call so a post-commit throw can never fail the write or skip the republish;
+ * `republish` itself stays outside every try/catch (see `republish` above).
+ */
 async function republishAndRespond<Extra>(
-  round: Round,
+  committed: RoundWriteContext,
   hooks: RoundWriteHooks<Extra> | undefined,
   extra: Extra
 ): Promise<HttpResponseInit> {
-  await republish(round);
+  if (hooks?.afterCommit) {
+    try {
+      await hooks.afterCommit(committed);
+    } catch (err: unknown) {
+      committed.ctx.error(
+        `[round ${committed.id}] post-commit work failed after the write committed:`,
+        err
+      );
+    }
+  }
+  await republish(committed.round);
   return {
     status: 200,
-    jsonBody: hooks?.respond ? hooks.respond(round, extra) : round,
+    jsonBody: hooks?.respond ? hooks.respond(committed.round, extra) : committed.round,
   };
 }
 
@@ -414,7 +481,7 @@ async function runRoundWrite<Extra>(
     translateStorageError(err);
   }
 
-  return republishAndRespond(written, hooks, extra);
+  return republishAndRespond({ req, ctx, caller, id, round: written }, hooks, extra);
 }
 
 /**
@@ -496,7 +563,112 @@ async function runRoundAndBriefWrite<Extra>(
     translateStorageError(err);
   }
 
-  return republishAndRespond(written, hooks, extra);
+  return republishAndRespond({ req, ctx, caller, id, round: written }, hooks, extra);
+}
+
+/**
+ * The `roundAndBriefRollback` lease strategy (lock): requireId ->
+ * requireCoordCaller -> readRoundTranslated -> assertCanManageRound -> scope ->
+ * chargeLimiter -> assertFrom -> gate -> withRoundAndBriefLease{ readJson(round)
+ * -> assertFrom -> readJson(brief, BriefSchema) -> capture the brief's raw bytes
+ * -> mutate({round, brief}) -> `round.status = spec.to` -> writePrivateJson(brief,
+ * briefLeaseId) -> writePrivateJson(round, roundLeaseId); if the round write
+ * fails, restore the raw brief bytes under the brief lease (a failed restore emits
+ * `puretrack.crossBlobReconcileRequired` with `operation` = the row key) and
+ * rethrow } -> non-HttpError -> `persistFailure` -> afterCommit -> republish ->
+ * respond (200). No preview path.
+ *
+ * (a) The lease block deliberately does NOT use `translateStorageError`. Every
+ * non-`HttpError` becomes `spec.persistFailure`. That includes:
+ *   - lease acquisition failures, such as a 404 for a round or brief that
+ *     vanished, or exhausted 409/412 retries;
+ *   - read failures, including `BlobShapeError`;
+ *   - write failures;
+ *   - a failed rollback.
+ *
+ * `HttpError`s thrown by hooks pass through unchanged.
+ *
+ * (b) `withPrivateLeaseRetry` may re-run the callback when a storage 409/412
+ * escapes it (blob.ts:286-304). That is why the committed context is built from
+ * the callback's return value, and why `mutate` must be re-entrant: it only
+ * reads what `gate` stashed. In-lease `HttpError`s carry `status`, not
+ * `statusCode` (http.ts:19-32), so they are never retried.
+ *
+ * (c) The brief-then-round order, the byte-exact rollback and the reconcile
+ * event were moved from `lockRound` (roundsMutate.ts). A failed brief write
+ * must leave the round BriefComplete, so the round write never runs unless the
+ * brief write succeeded; a failed round write restores the brief's original
+ * bytes so the two blobs never diverge. `operation` is the row's key.
+ *
+ * (d) The pre-read exists so that the `gate` hook's pilot-Snapshot fan-out runs
+ * outside the lease.
+ */
+async function runRoundAndBriefRollbackWrite<Extra>(
+  req: HttpRequest,
+  ctx: InvocationContext,
+  name: RoundWriteName,
+  spec: RollbackTransitionWriteSpec,
+  hooks: RoundWriteHooks<Extra> | undefined
+): Promise<HttpResponseInit> {
+  const id = requireId(req);
+  const caller = await requireCoordCaller(req);
+
+  const path = `rounds/${id}.json`;
+
+  const preRound = await readRoundTranslated(path);
+  assertCanManageRound(caller, preRound);
+  const preContext: RoundWriteContext = { req, ctx, caller, id, round: preRound };
+  if (hooks?.scope) await hooks.scope(preContext);
+  await chargeLimiter(req, caller, spec);
+  assertFrom(spec, preRound);
+  if (hooks?.gate) await hooks.gate(preContext);
+
+  let extra: Extra;
+  let written: Round;
+
+  try {
+    const leased = await withRoundAndBriefLease(id, async (roundLeaseId, briefLeaseId) => {
+      const round = await readJson(getPrivateBlobClient(path), RoundSchema, path);
+      assertFrom(spec, round);
+      const briefPath = `round-briefs/${id}.json`;
+      const brief = await readJson(getPrivateBlobClient(briefPath), BriefSchema, briefPath);
+      const briefClient = getPrivateBlockBlobClient(briefPath);
+      const originalBriefBytes = await briefClient.downloadToBuffer();
+      const c: RoundWriteContext = { req, ctx, caller, id, round, brief };
+      const produced = hooks?.mutate ? await hooks.mutate(c) : (undefined as Extra);
+      round.status = spec.to;
+      await writePrivateJson(briefPath, BriefSchema, brief, briefLeaseId);
+      try {
+        await writePrivateJson(path, RoundSchema, round, roundLeaseId);
+      } catch (roundWriteError: unknown) {
+        await briefClient
+          .upload(originalBriefBytes, originalBriefBytes.length, {
+            blobHTTPHeaders: { blobContentType: "application/json" },
+            conditions: { leaseId: briefLeaseId },
+          })
+          .catch((rollbackError: unknown) => {
+            getTelemetryClient()?.trackEvent({
+              name: "puretrack.crossBlobReconcileRequired",
+              properties: {
+                roundId: id,
+                operation: name,
+                roundWriteError: roundWriteError instanceof Error ? roundWriteError.name : "unknown",
+                rollbackError: rollbackError instanceof Error ? rollbackError.name : "unknown",
+              },
+            });
+          });
+        throw roundWriteError;
+      }
+      return { round, produced };
+    });
+    written = leased.round;
+    extra = leased.produced;
+  } catch (err: unknown) {
+    if (err instanceof HttpError) throw err;
+    throw new HttpError(500, spec.persistFailure.code, spec.persistFailure.detail);
+  }
+
+  return republishAndRespond({ req, ctx, caller, id, round: written }, hooks, extra);
 }
 
 /**
@@ -567,7 +739,7 @@ async function runPureTrackEchoesWrite<Extra>(
   // path either throws or captures, but an uncaptured round is a 500, never a
   // silently empty 200.
   if (capturedRound === undefined) throw new HttpError(500, "INTERNAL");
-  return republishAndRespond(capturedRound, hooks, capturedExtra);
+  return republishAndRespond({ req, ctx, caller, id, round: capturedRound }, hooks, capturedExtra);
 }
 
 /**
@@ -635,6 +807,9 @@ export function applyRoundWrite<Extra = undefined>(
       spec,
       hooks as RoundWriteHooks<Extra> | undefined
     );
+  }
+  if (spec.kind === "transition" && spec.lease === "roundAndBriefRollback") {
+    return runRoundAndBriefRollbackWrite(req, ctx, name, spec, hooks as RoundWriteHooks<Extra> | undefined);
   }
   if (spec.kind === "transition" && spec.lease === "pureTrackEchoes") {
     return runPureTrackEchoesWrite(

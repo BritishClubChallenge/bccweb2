@@ -14,12 +14,12 @@
  * POST   /api/rounds/{id}/uncancel         — Cancelled → Proposed
  * POST   /api/rounds/{id}/complete         — Locked → Complete + score + recompute
  *
- * Eight of these endpoints (create, update, confirm, brief-complete, reopen,
- * cancel, uncancel, unlock) are rows in the `ROUND_WRITES` table in
+ * Nine of these endpoints (create, update, confirm, brief-complete, reopen,
+ * cancel, uncancel, unlock, lock) are rows in the `ROUND_WRITES` table in
  * lib/roundTransitions.ts — the handlers below are one-liners over
- * `applyRoundWrite`, each carrying only its own hooks. `lockRound` and
- * `completeRound` remain bespoke here pending #275/#276, as do the
- * brief/PureTrack/PDF/email helpers they and the table hooks share.
+ * `applyRoundWrite`, each carrying only its own hooks. `completeRound` remains
+ * bespoke here pending #276; the brief/PureTrack/PDF/email helpers the hooks
+ * share live here too.
  */
 
 import {
@@ -57,10 +57,8 @@ import { scoreRoundEnforcingValidation } from "../lib/scoreRoundValidated.js";
 import {
   getBlobClient,
   getPrivateBlobClient,
-  getPrivateBlockBlobClient,
   withLease,
   withPrivateLeaseRenewing,
-  withRoundAndBriefLease,
 } from "../lib/blob.js";
 import { readJson, writeJson, writePrivateJson } from "../lib/blobJson.js";
 import {
@@ -765,49 +763,8 @@ async function mergeBriefForLock(
   return merged;
 }
 
-/**
- * BriefComplete → Locked.
- * Takes a snapshot of each registered pilot's safety/scoring data from
- * their pilot document. Resets accountedFor for all slots; preserves signToFly.
- * After the lock is confirmed, enqueues PureTrack-group and PDF jobs.
- */
-async function lockRound(
-  req: HttpRequest,
-  _ctx: InvocationContext
-): Promise<HttpResponseInit> {
-  const id = req.params["id"];
-  if (!id) throw new HttpError(400, "MISSING_ROUND_ID", "Missing round id");
-
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
-
-  const path = `rounds/${id}.json`;
-
-  // Read round first (outside lease) to gather pilot IDs
-  let round: Round;
-  try {
-    round = await readJson(getPrivateBlobClient(path), RoundSchema, path);
-  } catch (err: unknown) {
-    if ((err as { statusCode?: number }).statusCode === 404) {
-      throw new HttpError(404, "NOT_FOUND", "Round not found");
-    }
-    throw new HttpError(500, "INTERNAL");
-  }
-
-  assertCanManageRound(caller, round);
-  await mutationRateLimit(req, caller, "lockRound", "heavy");
-
-  if (round.status !== "BriefComplete") {
-    return {
-      status: 409,
-      jsonBody: {
-        error: `Round must be BriefComplete to lock (currently ${round.status})`,
-      },
-    };
-  }
-
-  // Load pilot snapshots in parallel (outside the lease — avoids 30s timeout)
+// Load pilot snapshots in parallel (outside the lease — avoids 30s timeout)
+async function loadLockSnapshots(round: Round): Promise<Map<string, PilotSnapshot>> {
   const pilotIds = round.teams.flatMap((t) =>
     t.pilots.filter((s) => s.pilotId && s.status === "Filled").map((s) => s.pilotId!)
   );
@@ -842,7 +799,10 @@ async function lockRound(
       }
     })
   );
+  return snapshotMap;
+}
 
+function buildLockCandidate(round: Round, snapshotMap: Map<string, PilotSnapshot>): Round {
   const candidateRound = structuredClone(round);
   candidateRound.pureTrackGroupId = undefined;
   candidateRound.pureTrackGroupName = undefined;
@@ -861,99 +821,189 @@ async function lockRound(
       slot.accountedFor = false;
     }
   }
+  return candidateRound;
+}
 
-  // B3: the brief is its own blob, so the round lease does NOT cover it. Read
-  // the frozen brief, refresh teams, verify the frozen material hash, then
-  // persist BOTH the brief JSON and the Locked round atomically under the
-  // round+brief leases. The brief must already exist (brief-complete froze it) —
-  // a missing blob cannot be leased.
-  if (!(await readExistingBriefForLock(id))) {
+// The frozen material hash MUST still match — otherwise the persisted brief
+// was mutated out-of-band since brief-complete. Abort the lock (the round
+// write below never runs, so it stays BriefComplete) with a diagnostic and
+// an operator-actionable message; never a silent failure.
+function assertFrozenBriefIntact(roundId: string, brief: RoundBrief): void {
+  if (brief.hash === undefined || computeBriefHash(brief) !== brief.hash) {
+    getTelemetryClient()?.trackTrace({
+      message: "brief.lockHashMismatch",
+      properties: { roundId },
+    });
     throw new HttpError(
       409,
-      "BRIEF_REQUIRED",
-      "A frozen brief must exist before locking — reopen and re-complete the round",
+      "BRIEF_HASH_MISMATCH",
+      "Brief material no longer matches its frozen sign-to-fly hash — reopen and re-complete the round before locking",
     );
   }
+}
 
-  const briefPaths = {
-    jsonPath: `round-briefs/${id}.json`,
-    pdfPath: `round-briefs/${id}.pdf`,
+async function listLockSignatures(roundId: string): Promise<Signature[]> {
+  try {
+    return await listSignaturesForRound(roundId);
+  } catch {
+    // The lock row's persistFailure turns anything that is not an HttpError
+    // into BRIEF_PERSIST_FAILED and tells the operator to reopen and re-complete.
+    // Nothing has been persisted yet here, and that advice does not repair an
+    // unreadable or malformed ledger, so report the real cause. The
+    // underlying error is deliberately not echoed — it can carry storage
+    // paths.
+    throw new HttpError(
+      500,
+      "SIGNATURE_LEDGER_UNAVAILABLE",
+      "Could not read the sign-to-fly ledger while locking — the round remains BriefComplete; retry once the ledger is readable",
+    );
+  }
+}
+
+/**
+ * Every Filled slot must hold a signature at the current brief version
+ * before the round may lock, checked against the leased round `round` and the
+ * frozen brief `frozenBrief` rather than the candidate.
+ *
+ * The signing handlers take NO lease — signatures.ts appends to the ledger
+ * directly — so a signature can land between this listing and the commit.
+ * That is safe because the ledger is append-only: a listing can only miss
+ * a new signature, never lose one it saw, so the race yields at worst a
+ * spurious 409 that succeeds on retry, and never a lock admitted on
+ * signatures this check did not see. The round+brief lease held here does
+ * exclude concurrent reopen (reopen takes the round lease) and brief edits,
+ * which is what the hash gate (`assertFrozenBriefIntact`) depends on.
+ */
+function assertEverySlotSigned(round: Round, frozenBrief: RoundBrief, signatures: Signature[]): void {
+  const unsigned = findUnsignedSlots(round, frozenBrief, signatures);
+  if (unsigned.length > 0) {
+    throw new HttpError(
+      409,
+      "SIGNATURES_INCOMPLETE",
+      `Unsigned slots: ${formatSlotRefs(unsigned)}`,
+    );
+  }
+}
+
+interface LockAttempt {
+  readonly roundId: string;
+  readonly snapshotMap: Map<string, PilotSnapshot>;
+  readonly briefGeneratedAt: RoundBrief["generatedAt"];
+  readonly pdfAttemptId: string;
+  readonly pureTrackAttemptId: string;
+}
+
+function applyLockToRound(round: Round, lock: LockAttempt): void {
+  round.isLocked = true;
+  round.pureTrack = {
+    status: "pending",
+    attemptId: lock.pureTrackAttemptId,
+    updatedAt: new Date().toISOString(),
   };
+  round.pureTrackGroupId = undefined;
+  round.pureTrackGroupName = undefined;
+  round.pureTrackGroupSlug = undefined;
 
-  let updated: Round;
+  for (const team of round.teams) {
+    team.pureTrackGroupId = undefined;
+    team.pureTrackGroupSlug = undefined;
+    for (const slot of team.pilots) {
+      if (slot.pilotId && lock.snapshotMap.has(slot.pilotId)) {
+        slot.snapshot = lock.snapshotMap.get(slot.pilotId)!;
+      }
+      slot.accountedFor = false;
+    }
+  }
+
+  round.brief = {
+    version: (round.brief?.version ?? 0) + 1,
+    jsonPath: `round-briefs/${lock.roundId}.json`,
+    pdfPath: `round-briefs/${lock.roundId}.pdf`,
+    generatedAt: lock.briefGeneratedAt,
+    pdfStatus: "pending",
+    pdfError: undefined,
+    pdfUpdatedAt: new Date().toISOString(),
+    pdfAttemptId: lock.pdfAttemptId,
+  };
+}
+
+// PDF generation is best-effort AFTER the brief JSON and round are committed: a
+// queue failure leaves the round Locked and marks only the PDF state failed.
+async function enqueueLockJobs(roundId: string, round: Round, pdfAttemptId: string, pureTrackAttemptId: string): Promise<void> {
+  const path = `rounds/${roundId}.json`;
+  try {
+    await enqueueBriefPdf({ roundId, briefVersion: round.brief!.version!, pdfAttemptId });
+  } catch {
+    // Recovery is best-effort: a failure here must NOT fail the lock or skip updateRoundsIndex.
+    await setBriefPdfStatus(roundId, "failed", { error: "enqueue_failed", expectAttemptId: pdfAttemptId, fromStatuses: ["pending", "processing"] }).catch(() => undefined);
+    const recovered = await readJson(getPrivateBlobClient(path), RoundSchema, path).catch(() => undefined);
+    if (recovered?.brief !== undefined) round.brief = recovered.brief;
+  }
+
+  try {
+    await enqueuePureTrackGroupJob({
+      roundId,
+      attemptId: pureTrackAttemptId,
+    });
+  } catch {
+    await setPureTrackStatus(roundId, "failed", {
+      error: "enqueue_failed",
+      expectAttemptId: pureTrackAttemptId,
+      fromStatuses: ["pending", "processing"],
+    }).catch(() => undefined);
+    const recovered = await readJson(getPrivateBlobClient(path), RoundSchema, path).catch(() => undefined);
+    if (recovered?.pureTrack !== undefined) round.pureTrack = recovered.pureTrack;
+  }
+}
+
+/**
+ * POST /api/rounds/{id}/lock — BriefComplete → Locked, run by the
+ * `roundAndBriefRollback` lease strategy in lib/roundTransitions.ts (both
+ * leases, brief-then-round write, byte-exact brief rollback, 500
+ * BRIEF_PERSIST_FAILED from the row's persistFailure).
+ *
+ * - gate (unleased pre-read, after the from-gate and the limiter): take the
+ *   pilot Snapshots and build the Locked candidate OUTSIDE the lease, then 409
+ *   BRIEF_REQUIRED when no frozen brief exists (a missing blob cannot be leased).
+ * - mutate (under both leases): rebuild the frozen brief's roster from the
+ *   candidate, then the in-lease gates — 409 BRIEF_HASH_MISMATCH, 500
+ *   SIGNATURE_LEDGER_UNAVAILABLE, 409 SIGNATURES_INCOMPLETE — then materialize
+ *   signToFly from that same ledger listing and apply the lock to the round.
+ *   Resets accountedFor for every slot; preserves signToFly.
+ * - afterCommit: enqueue the brief-PDF and PureTrack jobs, best-effort.
+ */
+function lockRound(req: HttpRequest, ctx: InvocationContext): Promise<HttpResponseInit> {
+  // Per-invocation closure state: gate() fills `snapshots`/`candidate` from the
+  // UNLEASED pre-read; mutate() and afterCommit() read them with the attempt
+  // ids. Function-scoped — NEVER module scope (see createRound above).
+  let snapshots!: Map<string, PilotSnapshot>;
+  let candidate!: Round;
   const pdfAttemptId = randomUUID();
   const pureTrackAttemptId = randomUUID();
-  try {
-    const result = await withRoundAndBriefLease(id, async (roundLeaseId, briefLeaseId) => {
-      const r: Round = await readJson(
-        getPrivateBlobClient(path),
-        RoundSchema,
-        path,
-      );
 
-      if (r.status !== "BriefComplete") {
-        throw new HttpError(409, "CONFLICT", "Round status changed concurrently");
-      }
-
-      const briefPath = `round-briefs/${id}.json`;
-      const existing = await readJson(getPrivateBlobClient(briefPath), BriefSchema, briefPath);
-      const briefClient = getPrivateBlockBlobClient(briefPath);
-      const originalBriefBytes = await briefClient.downloadToBuffer();
-      const brief = await mergeBriefForLock(candidateRound, existing);
-
-      // The frozen material hash MUST still match — otherwise the persisted brief
-      // was mutated out-of-band since brief-complete. Abort the lock (the round
-      // write below never runs, so it stays BriefComplete) with a diagnostic and
-      // an operator-actionable message; never a silent failure.
-      if (brief.hash === undefined || computeBriefHash(brief) !== brief.hash) {
-        getTelemetryClient()?.trackTrace({
-          message: "brief.lockHashMismatch",
-          properties: { roundId: id },
-        });
+  return applyRoundWrite(req, ctx, "lock", {
+    gate: async ({ id, round }) => {
+      snapshots = await loadLockSnapshots(round);
+      candidate = buildLockCandidate(round, snapshots);
+      // B3: the brief is its own blob, so the round lease does NOT cover it.
+      // Read the frozen brief, refresh teams, verify the frozen material hash,
+      // then persist BOTH the brief JSON and the Locked round atomically under
+      // the round+brief leases. The brief must already exist (brief-complete
+      // froze it) — a missing blob cannot be leased.
+      if (!(await readExistingBriefForLock(id))) {
         throw new HttpError(
           409,
-          "BRIEF_HASH_MISMATCH",
-          "Brief material no longer matches its frozen sign-to-fly hash — reopen and re-complete the round before locking",
+          "BRIEF_REQUIRED",
+          "A frozen brief must exist before locking — reopen and re-complete the round",
         );
       }
-
-      // Every Filled slot must hold a signature at the current brief version
-      // before the round may lock, checked against the leased round `r` and the
-      // frozen brief `existing` rather than the candidate.
-      //
-      // The signing handlers take NO lease — signatures.ts appends to the ledger
-      // directly — so a signature can land between this listing and the commit.
-      // That is safe because the ledger is append-only: a listing can only miss
-      // a new signature, never lose one it saw, so the race yields at worst a
-      // spurious 409 that succeeds on retry, and never a lock admitted on
-      // signatures this check did not see. The round+brief lease held here does
-      // exclude concurrent reopen (`transition` takes the round lease) and brief
-      // edits, which is what the hash check above depends on.
-      let signatures: Signature[];
-      try {
-        signatures = await listSignaturesForRound(id);
-      } catch {
-        // The outer catch turns anything that is not an HttpError into
-        // BRIEF_PERSIST_FAILED and tells the operator to reopen and re-complete.
-        // Nothing has been persisted yet here, and that advice does not repair an
-        // unreadable or malformed ledger, so report the real cause. The
-        // underlying error is deliberately not echoed — it can carry storage
-        // paths.
-        throw new HttpError(
-          500,
-          "SIGNATURE_LEDGER_UNAVAILABLE",
-          "Could not read the sign-to-fly ledger while locking — the round remains BriefComplete; retry once the ledger is readable",
-        );
-      }
-      const unsigned = findUnsignedSlots(r, existing, signatures);
-      if (unsigned.length > 0) {
-        throw new HttpError(
-          409,
-          "SIGNATURES_INCOMPLETE",
-          `Unsigned slots: ${formatSlotRefs(unsigned)}`,
-        );
-      }
-
+    },
+    mutate: async ({ id, round, brief }) => {
+      const frozen = brief!;
+      const merged = await mergeBriefForLock(candidate, frozen);
+      assertFrozenBriefIntact(id, merged);
+      const signatures = await listLockSignatures(id);
+      assertEverySlotSigned(round, frozen, signatures);
       // Write the ledger result onto the slots before the round leaves
       // BriefComplete. `slot.signToFly` is materialized asynchronously off the
       // signtofly-reflect queue, so it can still be false here even though every
@@ -961,108 +1011,23 @@ async function lockRound(
       // non-BriefComplete rounds, so a reflect job that lands after this write
       // would be a no-op and the stale false would become permanent. The gate
       // above has already proven the ledger under this same lease, so reuse it.
-      materializeSignToFly(r, existing, signatures);
-
-      // Hard failure: if the frozen brief JSON cannot be written, the round must
-      // NOT advance to Locked. This write throws on failure, so the round write
-      // that follows never runs and the round stays BriefComplete.
-      await writePrivateJson(briefPath, BriefSchema, brief, briefLeaseId);
-
-      r.status = "Locked";
-      r.isLocked = true;
-      r.pureTrack = {
-        status: "pending",
-        attemptId: pureTrackAttemptId,
-        updatedAt: new Date().toISOString(),
-      };
-      r.pureTrackGroupId = undefined;
-      r.pureTrackGroupName = undefined;
-      r.pureTrackGroupSlug = undefined;
-
-      for (const team of r.teams) {
-        team.pureTrackGroupId = undefined;
-        team.pureTrackGroupSlug = undefined;
-        for (const slot of team.pilots) {
-          if (slot.pilotId && snapshotMap.has(slot.pilotId)) {
-            slot.snapshot = snapshotMap.get(slot.pilotId)!;
-          }
-          slot.accountedFor = false;
-        }
-      }
-
-      r.brief = {
-        version: (r.brief?.version ?? 0) + 1,
-        jsonPath: briefPaths.jsonPath,
-        pdfPath: briefPaths.pdfPath,
-        generatedAt: brief.generatedAt,
-        pdfStatus: "pending",
-        pdfError: undefined,
-        pdfUpdatedAt: new Date().toISOString(),
+      materializeSignToFly(round, frozen, signatures);
+      applyLockToRound(round, {
+        roundId: id,
+        snapshotMap: snapshots,
+        briefGeneratedAt: merged.generatedAt,
         pdfAttemptId,
-      };
-
-      try {
-        await writePrivateJson(path, RoundSchema, r, roundLeaseId);
-      } catch (roundWriteError: unknown) {
-        await briefClient.upload(originalBriefBytes, originalBriefBytes.length, {
-          blobHTTPHeaders: { blobContentType: "application/json" },
-          conditions: { leaseId: briefLeaseId },
-        }).catch((rollbackError: unknown) => {
-          getTelemetryClient()?.trackEvent({
-            name: "puretrack.crossBlobReconcileRequired",
-            properties: {
-              roundId: id,
-              operation: "lock",
-              roundWriteError:
-                roundWriteError instanceof Error ? roundWriteError.name : "unknown",
-              rollbackError:
-                rollbackError instanceof Error ? rollbackError.name : "unknown",
-            },
-          });
-        });
-        throw roundWriteError;
-      }
-      return { round: r, brief };
-    });
-    updated = result.round;
-  } catch (err: unknown) {
-    if (err instanceof HttpError) throw err;
-    throw new HttpError(
-      500,
-      "BRIEF_PERSIST_FAILED",
-      "Failed to persist the brief while locking — the round remains BriefComplete; reopen and re-complete before retrying the lock",
-    );
-  }
-
-  // PDF generation is best-effort AFTER the brief JSON and round are committed: a
-  // queue failure leaves the round Locked and marks only the PDF state failed.
-  try {
-    await enqueueBriefPdf({ roundId: id, briefVersion: updated.brief!.version!, pdfAttemptId });
-  } catch {
-    // Recovery is best-effort: a failure here must NOT fail the lock or skip updateRoundsIndex.
-    await setBriefPdfStatus(id, "failed", { error: "enqueue_failed", expectAttemptId: pdfAttemptId, fromStatuses: ["pending", "processing"] }).catch(() => undefined);
-    const recovered = await readJson(getPrivateBlobClient(path), RoundSchema, path).catch(() => undefined);
-    if (recovered?.brief !== undefined) updated.brief = recovered.brief;
-  }
-
-  try {
-    await enqueuePureTrackGroupJob({
-      roundId: id,
-      attemptId: pureTrackAttemptId,
-    });
-  } catch {
-    await setPureTrackStatus(id, "failed", {
-      error: "enqueue_failed",
-      expectAttemptId: pureTrackAttemptId,
-      fromStatuses: ["pending", "processing"],
-    }).catch(() => undefined);
-    const recovered = await readJson(getPrivateBlobClient(path), RoundSchema, path).catch(() => undefined);
-    if (recovered?.pureTrack !== undefined) updated.pureTrack = recovered.pureTrack;
-  }
-
-  await updateRoundsIndex(updated);
-
-  return { status: 200, jsonBody: updated };
+        pureTrackAttemptId,
+      });
+      // The executor persists the LEASED brief object, so copy the rebuilt brief
+      // onto it. merged's keys ⊇ frozen's (mergeBriefForLock spreads it), so the
+      // persisted JSON is exactly mergeBriefForLock's output. This runs last, so
+      // the gates above saw the frozen brief.
+      Object.assign(frozen, merged);
+    },
+    afterCommit: ({ id, round }) =>
+      enqueueLockJobs(id, round, pdfAttemptId, pureTrackAttemptId),
+  });
 }
 
 /**

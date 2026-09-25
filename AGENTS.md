@@ -385,6 +385,6 @@ See [docs/agents/triage-labels.md](docs/agents/triage-labels.md).
 
 ### Domain docs
 
-Single-context: one root `CONTEXT.md` glossary plus `docs/adr/` for decisions. Neither
-exists yet — `domain-modeling` creates them lazily as terms and decisions get resolved.
+Single-context: one root `CONTEXT.md` glossary (present) plus `docs/adr/` for decisions (not
+created yet) — `domain-modeling` adds terms and ADRs lazily as they get resolved.
 See [docs/agents/domain.md](docs/agents/domain.md).

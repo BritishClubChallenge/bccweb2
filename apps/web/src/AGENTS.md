@@ -56,8 +56,8 @@ unless genuinely shared — page-local state/effects live inside the page.
 `api.ts` (`get/post/put/delete/deleteJson`, `ApiError`, auto token refresh w/ single-flight
 lock), `blobClient.ts` (public reader behind `useBlob`), `sanitize.ts` (HTML sanitizer for
 sign-to-fly wording), `telemetry.ts` (PII redaction + RUM stub), `terms.ts` (T&Cs version).
-**All mutations go through `api.ts`** — except multipart upload (raw `fetch` + `FormData`,
-see `RoundManage.tsx`).
+**All mutations go through `api.ts`** — except multipart uploads (raw `fetch` + `FormData`:
+`pages/rounds/RoundBriefForm.tsx` for brief images, `pages/rounds/components/IgcUploadButton.tsx` for tracklogs).
 
 ## public/static/ — vendored legacy PDFs
 
@@ -73,8 +73,9 @@ Folder = route domain (`auth`, `rounds`, `results`, `pilots`, `admin`, `club`; p
 - early-return loading / error / forbidden states
 - mutation handlers live in the page file (no shared form layer); inline styles OK
 
-Big pages: `RoundManage.tsx` (~1486 — coordinator control panel: status workflow, metadata,
-narrative, teams, slots, flights), `RoundBrief.tsx` (locked brief viewer + PDF/image),
+Key pages: `RoundManage.tsx` (~275 — coordinator control-panel shell: loads the round, owns
+`runAction`, and composes `RoundManageHeader`, `RoundWorkflowActions`, `RoundMetadataForm`,
+`RoundBriefForm` and `RoundTeamsList`), `RoundBrief.tsx` (locked brief viewer + PDF/image),
 `PilotProfile.tsx` (view/edit profile). Mutation examples: `CreateRound.tsx` →
 `api.post("rounds",…)`; `RegisterForRound.tsx` → `…/register-self`; `PilotProfile.tsx` →
 `api.put("pilots/:id",…)`; `SignToFly.tsx` → `…/teams/:teamId/pilots/:place/sign`.
