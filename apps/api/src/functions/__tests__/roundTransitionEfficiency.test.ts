@@ -174,6 +174,36 @@ async function measure(
   }
 }
 
+/**
+ * `measure()` generalised to a write that is not a pure transition: the caller
+ * supplies the method/params/query/body and the exact `roundPath` the read
+ * meter arms on. For create there is no pre-existing round, so the caller
+ * passes the sentinel `"rounds/__create-sentinel__.json"` — nothing ever reads
+ * that path, but arming the meter is what turns the caller counter on.
+ */
+async function measureWrite(
+  user: Pick<User, "id" | "email">,
+  handler: string,
+  init: {
+    method?: string;
+    params?: Record<string, string>;
+    query?: Record<string, string>;
+    body?: unknown;
+  },
+  roundPath: string,
+): Promise<Measured> {
+  meter.reads = 0;
+  meter.callers = 0;
+  meter.roundPath = roundPath;
+  republish.mockClear();
+  try {
+    const res = await invoke(handler, makeAuthRequest(user.id, user.email, init));
+    return { res, reads: meter.reads, callers: meter.callers };
+  } finally {
+    meter.roundPath = null;
+  }
+}
+
 // ─── Criterion 2: one read, one caller resolution ─────────────────────────────
 
 describe("round transitions — per-request work budget (issue 274)", () => {
@@ -235,6 +265,316 @@ describe("round transitions — republish (issue 274)", () => {
     // artefact of the request failing earlier than the status gate.
     expect((await readPrivateJson<Round>(`rounds/${round.id}.json`))?.status).toBe(
       spec.conflictFrom,
+    );
+  });
+});
+
+// ─── createRound (issue 277) ──────────────────────────────────────────────────
+
+describe("round writes - createRound (issue 277)", () => {
+  beforeEach(() => resetAllBuckets());
+
+  it("resolves the caller once", async () => {
+    const seeded = await makeRound();
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res, callers } = await measureWrite(
+      user,
+      "createRound",
+      {
+        method: "POST",
+        body: {
+          date: "2026-06-01",
+          siteId: seeded.site.id,
+          seasonYear: seeded.season.year,
+        },
+      },
+      "rounds/__create-sentinel__.json",
+    );
+
+    expect(res.status).toBe(201);
+    expect(callers).toBeGreaterThanOrEqual(1);
+    expect.soft(callers).toBe(1);
+  });
+
+  it("republishes the created round exactly once", async () => {
+    const seeded = await makeRound();
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res } = await measureWrite(
+      user,
+      "createRound",
+      {
+        method: "POST",
+        body: {
+          date: "2026-06-01",
+          siteId: seeded.site.id,
+          seasonYear: seeded.season.year,
+        },
+      },
+      "rounds/__create-sentinel__.json",
+    );
+
+    expect(res.status).toBe(201);
+    expect(republish).toHaveBeenCalledTimes(1);
+    expect(republish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: (res.jsonBody as Round).id,
+        status: "Proposed",
+      }),
+    );
+  });
+
+  it("does not republish when the status validation 400s", async () => {
+    const seeded = await makeRound();
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res } = await measureWrite(
+      user,
+      "createRound",
+      {
+        method: "POST",
+        body: {
+          date: "2026-06-01",
+          siteId: seeded.site.id,
+          seasonYear: seeded.season.year,
+          status: "Locked",
+        },
+      },
+      "rounds/__create-sentinel__.json",
+    );
+
+    expect(res.status).toBe(400);
+    expect(republish).not.toHaveBeenCalled();
+  });
+});
+
+// ─── updateRound (issue 277, todo 3) ──────────────────────────────────────────
+
+describe("round writes - updateRound (issue 277)", () => {
+  beforeEach(() => resetAllBuckets());
+
+  it("reads rounds/{id}.json once and resolves the caller once", async () => {
+    const round = await seedRoundAt("Proposed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res, reads, callers } = await measureWrite(
+      user,
+      "updateRound",
+      { method: "PUT", params: { id: round.id }, body: { maxTeams: 4 } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(200);
+
+    // Vacuity guards — same reasoning as the transition budget above: a
+    // mis-scoped path filter must fail loudly, never masquerade as the target.
+    expect(reads).toBeGreaterThanOrEqual(1);
+    expect(callers).toBeGreaterThanOrEqual(1);
+
+    expect.soft(reads).toBe(1);
+    expect.soft(callers).toBe(1);
+  });
+
+  it("republishes the updated round exactly once", async () => {
+    const round = await seedRoundAt("Proposed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res } = await measureWrite(
+      user,
+      "updateRound",
+      { method: "PUT", params: { id: round.id }, body: { maxTeams: 4 } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(republish).toHaveBeenCalledTimes(1);
+    expect(republish).toHaveBeenCalledWith(
+      expect.objectContaining({ id: round.id, maxTeams: 4 }),
+    );
+  });
+
+  it("does not republish when the round is Cancelled (409)", async () => {
+    const round = await seedRoundAt("Cancelled");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res } = await measureWrite(
+      user,
+      "updateRound",
+      { method: "PUT", params: { id: round.id }, body: { maxTeams: 4 } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(republish).not.toHaveBeenCalled();
+  });
+});
+
+// ─── reopenBrief dryRun preview (issue 277, todo 4) ───────────────────────────
+
+describe("round writes - reopenBrief dryRun preview (issue 277)", () => {
+  beforeEach(() => resetAllBuckets());
+
+  it("preview reads rounds/{id}.json once, resolves the caller once, and never republishes", async () => {
+    const round = await seedRoundAt("BriefComplete");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res, reads, callers } = await measureWrite(
+      user,
+      "reopenBrief",
+      { method: "POST", params: { id: round.id }, query: { dryRun: "true" } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(200);
+
+    // Vacuity guards — same reasoning as the transition budget above.
+    expect(reads).toBeGreaterThanOrEqual(1);
+    expect(callers).toBeGreaterThanOrEqual(1);
+
+    expect.soft(reads).toBe(1);
+    expect.soft(callers).toBe(1);
+    expect(republish).not.toHaveBeenCalled();
+  });
+
+  it("a Confirmed round's preview 409s and does not republish", async () => {
+    const round = await seedRoundAt("Confirmed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res } = await measureWrite(
+      user,
+      "reopenBrief",
+      { method: "POST", params: { id: round.id }, query: { dryRun: "true" } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(republish).not.toHaveBeenCalled();
+  });
+});
+
+// ─── briefCompleteRound (issue 277, todo 5) ───────────────────────────────────
+
+describe("round writes - briefCompleteRound (issue 277)", () => {
+  beforeEach(() => resetAllBuckets());
+
+  it("real path reads rounds/{id}.json twice (pre-read + leased), resolves the caller once, republishes once", async () => {
+    const round = await seedRoundAt("Confirmed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res, reads, callers } = await measureWrite(
+      user,
+      "briefCompleteRound",
+      { method: "POST", params: { id: round.id } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(200);
+
+    // Vacuity guards — same reasoning as the transition budget above.
+    expect(reads).toBeGreaterThanOrEqual(1);
+    expect(callers).toBeGreaterThanOrEqual(1);
+
+    // TWO reads is the target here, not one: the unleased pre-read feeds
+    // assertCanManageRound/assertFrom/gate, then a FRESH read inside the lease
+    // re-checks the status (check-then-act) before the write.
+    expect.soft(reads).toBe(2);
+    expect.soft(callers).toBe(1);
+    expect(republish).toHaveBeenCalledTimes(1);
+    expect(republish).toHaveBeenCalledWith(
+      expect.objectContaining({ id: round.id, status: "BriefComplete" }),
+    );
+  });
+
+  it("preview reads rounds/{id}.json once, resolves the caller once, and never republishes", async () => {
+    const round = await seedRoundAt("Confirmed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res, reads, callers } = await measureWrite(
+      user,
+      "briefCompleteRound",
+      { method: "POST", params: { id: round.id }, query: { dryRun: "true" } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(200);
+
+    expect(reads).toBeGreaterThanOrEqual(1);
+    expect(callers).toBeGreaterThanOrEqual(1);
+
+    expect.soft(reads).toBe(1);
+    expect.soft(callers).toBe(1);
+    expect(republish).not.toHaveBeenCalled();
+  });
+
+  it("a Proposed round 409s and does not republish", async () => {
+    const round = await seedRoundAt("Proposed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res } = await measureWrite(
+      user,
+      "briefCompleteRound",
+      { method: "POST", params: { id: round.id } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(republish).not.toHaveBeenCalled();
+    expect((await readPrivateJson<Round>(`rounds/${round.id}.json`))?.status).toBe(
+      "Proposed",
+    );
+  });
+});
+
+// ─── unlockRound (issue 277, todo 6) ──────────────────────────────────────────
+
+describe("round writes - unlockRound (issue 277)", () => {
+  beforeEach(() => resetAllBuckets());
+
+  it("reads rounds/{id}.json twice (pre-read + leased), resolves the caller once, republishes once with Confirmed", async () => {
+    const round = await seedRoundAt("Locked");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res, reads, callers } = await measureWrite(
+      user,
+      "unlockRound",
+      { method: "POST", params: { id: round.id } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(200);
+
+    // Vacuity guards — same reasoning as the transition budget above.
+    expect(reads).toBeGreaterThanOrEqual(1);
+    expect(callers).toBeGreaterThanOrEqual(1);
+
+    // TWO reads is the target, like briefComplete: the unleased pre-read feeds
+    // assertCanManageRound, then mutatePureTrackEchoes re-reads the round
+    // INSIDE its lease (there is deliberately NO pre-lease status gate — the
+    // only assertFrom runs in the callback).
+    expect.soft(reads).toBe(2);
+    expect.soft(callers).toBe(1);
+    expect(republish).toHaveBeenCalledTimes(1);
+    expect(republish).toHaveBeenCalledWith(
+      expect.objectContaining({ id: round.id, status: "Confirmed" }),
+    );
+  });
+
+  it("a Confirmed round 409s and does not republish", async () => {
+    const round = await seedRoundAt("Confirmed");
+    const { user } = await makeUser({ roles: ["Admin"] });
+
+    const { res } = await measureWrite(
+      user,
+      "unlockRound",
+      { method: "POST", params: { id: round.id } },
+      `rounds/${round.id}.json`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(republish).not.toHaveBeenCalled();
+    expect((await readPrivateJson<Round>(`rounds/${round.id}.json`))?.status).toBe(
+      "Confirmed",
     );
   });
 });

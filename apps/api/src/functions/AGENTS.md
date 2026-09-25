@@ -30,15 +30,18 @@ gotchas, and root [AGENTS.md](../../../../AGENTS.md) for the overall architectur
 
 - Private read-modify-write → `withPrivateLease(...)`; long work → `withPrivateLeaseRenewing(...)`.
 - Public blob RMW → `withLease(...)`. Keep PDF/email/PureTrack work **outside** the lease.
-- Round finalize MUST `updateRoundsIndex(...)`; `completeRound` then fires
-  `recomputeSeason(year)` best-effort *after* the response.
+- Round finalize MUST `updateRoundsIndex(...)`. The eight writes routed through
+  `applyRoundWrite` get this from the executor, which republishes once for all of them;
+  they must NOT call it themselves (a second call site breaks the single-occurrence
+  contract test). `lockRound`/`completeRound` still call it directly; `completeRound`
+  then fires `recomputeSeason(year)` best-effort *after* the response.
 - `seasonClubs.ts` uses a `.lock` sentinel + renewing lease for multi-blob mutations.
 
 ## File map (non-obvious)
 
 | File | Why it's big / special |
 |------|------------------------|
-| `roundsMutate.ts` (1490) | 10 endpoints: create/update/confirm/brief-complete/reopen/lock/unlock/cancel/uncancel/complete + brief/PureTrack/PDF/email helpers; the four PURE status transitions (confirm/reopen/cancel/uncancel) are table-driven in [`../lib/roundTransitions.ts`](../lib/roundTransitions.ts) and the handlers here are one-liners over `applyRoundTransition` |
+| `roundsMutate.ts` (1311) | 10 endpoints: create/update/confirm/brief-complete/reopen/lock/unlock/cancel/uncancel/complete + brief/PureTrack/PDF/email helpers; eight of them (all but lock/complete) are rows in `ROUND_WRITES` ([`../lib/roundTransitions.ts`](../lib/roundTransitions.ts)) and the handlers here are one-liners over `applyRoundWrite` plus their hooks; `lockRound`/`completeRound` remain bespoke pending #275/#276 |
 | `puretrackGroups.ts` | queue-trigger consumer for `round-puretrack-group` (+ `-poison`); replaces-then-creates a round's PureTrack groups under a global mutation guard, commits via `commitPureTrackReady` |
 | `igcValidationWorker.ts` | queue-trigger consumer for `igc-validation`; guards/paces FAI calls, durably replays results, and applies validation under the round lease |
 | `teams.ts` | team + pilot slot management; `addPilot` hard-blocks wrong/absent season club (`422 TEAM_CLUB_MISMATCH` / `422 NO_CLUB_FOR_SEASON`) — no Admin override; see `docs/runbooks/round-club-pilot-decision.md` |

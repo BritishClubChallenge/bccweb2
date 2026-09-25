@@ -14,10 +14,12 @@
  * POST   /api/rounds/{id}/uncancel         — Cancelled → Proposed
  * POST   /api/rounds/{id}/complete         — Locked → Complete + score + recompute
  *
- * The four PURE status transitions (confirm, reopen, cancel, uncancel) are
- * table-driven and live in lib/roundTransitions.ts; the handlers below are
- * one-liners over `applyRoundTransition`. Everything still in this file does
- * work beyond `round.status = to`.
+ * Eight of these endpoints (create, update, confirm, brief-complete, reopen,
+ * cancel, uncancel, unlock) are rows in the `ROUND_WRITES` table in
+ * lib/roundTransitions.ts — the handlers below are one-liners over
+ * `applyRoundWrite`, each carrying only its own hooks. `lockRound` and
+ * `completeRound` remain bespoke here pending #275/#276, as do the
+ * brief/PureTrack/PDF/email helpers they and the table hooks share.
  */
 
 import {
@@ -28,7 +30,6 @@ import {
 } from "@azure/functions";
 import { randomUUID } from "node:crypto";
 import type {
-  CallerIdentity,
   Round,
   RoundStatus,
   Season,
@@ -58,7 +59,6 @@ import {
   getPrivateBlobClient,
   getPrivateBlockBlobClient,
   withLease,
-  withPrivateLease,
   withPrivateLeaseRenewing,
   withRoundAndBriefLease,
 } from "../lib/blob.js";
@@ -70,18 +70,13 @@ import {
 } from "../lib/auth.js";
 import { HttpError, withErrorHandler } from "../lib/http.js";
 import { assertCanManageRound, isCoord } from "../lib/roundAuth.js";
-import {
-  applyRoundTransition,
-  expectedStatusDetail,
-  ROUND_TRANSITIONS,
-} from "../lib/roundTransitions.js";
+import { applyRoundWrite } from "../lib/roundTransitions.js";
 import { mutationRateLimit } from "../lib/rateLimit.js";
 import { updateRoundsIndex, recomputeSeason } from "../lib/recompute.js";
 import { setBriefPdfStatus } from "../lib/briefPdf.js";
 import { enqueueBriefPdf, enqueuePureTrackGroupJob } from "../lib/queue.js";
 import {
   clearPureTrackEchoes,
-  mutatePureTrackEchoes,
   setPureTrackStatus,
 } from "../lib/puretrackStatus.js";
 import { getTelemetryClient } from "../lib/telemetry.js";
@@ -98,25 +93,6 @@ export interface BriefTimes {
   briefingTime?: string;
   checkInByTime?: string;
   landByTime?: string;
-}
-
-// ─── Auth helpers ─────────────────────────────────────────────────────────────
-
-async function assertManageableRound(
-  caller: CallerIdentity,
-  id: string,
-): Promise<void> {
-  const path = `rounds/${id}.json`;
-  let round: Round;
-  try {
-    round = await readJson(getPrivateBlobClient(path), RoundSchema, path);
-  } catch (err: unknown) {
-    if ((err as { statusCode?: number }).statusCode === 404) {
-      throw new HttpError(404, "NOT_FOUND", "Round not found");
-    }
-    throw new HttpError(500, "INTERNAL");
-  }
-  assertCanManageRound(caller, round);
 }
 
 // Schemas for blobs without dedicated re-exports.
@@ -147,222 +123,228 @@ async function loadConfig(): Promise<Config> {
 
 // ─── POST /api/rounds ─────────────────────────────────────────────────────────
 
-async function createRound(
+/** The create request body. All fields optional; `scope` validates presence. */
+interface CreateRoundBody {
+  date?: string;
+  siteId?: string;
+  seasonYear?: number;
+  organisingClubId?: string;
+  maxTeams?: number;
+  minimumScore?: number;
+  briefingTime?: string;
+  landByTime?: string;
+  checkInByTime?: string;
+  status?: string;
+}
+
+function createRound(
   req: HttpRequest,
   ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
+  // Per-invocation closure state: the create hooks receive only
+  // { req, ctx, caller }, so the parsed body and resolved organising club
+  // live in variables local to THIS call, captured by the scope/mutate/after
+  // closures below. Module-level state here would race across concurrent
+  // invocations — each call must get its own binding.
+  let body!: CreateRoundBody;
+  let organisingClubId: string | undefined;
 
-  const body = (await req.json()) as {
-    date?: string;
-    siteId?: string;
-    seasonYear?: number;
-    organisingClubId?: string;
-    maxTeams?: number;
-    minimumScore?: number;
-    briefingTime?: string;
-    landByTime?: string;
-    checkInByTime?: string;
-    status?: string;
-  };
+  return applyRoundWrite(req, ctx, "create", {
+    scope: async (c) => {
+      body = (await c.req.json()) as CreateRoundBody;
 
-  const { date, siteId, seasonYear } = body;
-  if (!date || !siteId || !seasonYear) {
-    throw new HttpError(400, "INVALID_BODY", "date, siteId, and seasonYear are required");
-  }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    throw new HttpError(400, "INVALID_DATE", "date must be yyyy-MM-dd");
-  }
-
-  // A non-admin coord may only organise rounds for their own club, and must have one.
-  const isAdmin = caller.roles.includes("Admin");
-  if (!isAdmin && !caller.clubId) {
-    return forbiddenResponse("Your account is not linked to a club");
-  }
-  if (!isAdmin && body.organisingClubId && body.organisingClubId !== caller.clubId) {
-    return forbiddenResponse("You can only create rounds for your own club");
-  }
-  const organisingClubId = isAdmin ? body.organisingClubId : caller.clubId;
-
-  await mutationRateLimit(req, caller, "createRound", "standard");
-
-  // Load site
-  let site: Site;
-  try {
-    const sitePath = `sites/${siteId}.json`;
-    site = await readJson(getPrivateBlobClient(sitePath), SiteSchema, sitePath);
-  } catch (err: unknown) {
-    if ((err as { statusCode?: number }).statusCode === 404) {
-      throw new HttpError(400, "INVALID_BODY", "Site not found");
-    }
-    throw new HttpError(500, "INTERNAL");
-  }
-
-  // Load season (must exist)
-  let season: Season;
-  try {
-    const seasonPath = `seasons/${seasonYear}.json`;
-    season = await readJson(getBlobClient(seasonPath), SeasonSchema, seasonPath);
-  } catch (err: unknown) {
-    if ((err as { statusCode?: number }).statusCode === 404) {
-      throw new HttpError(400, "INVALID_BODY", "Season not found");
-    }
-    throw new HttpError(500, "INTERNAL");
-  }
-
-  let organisingClub: { id: string; name: string } | undefined;
-  if (organisingClubId) {
-    try {
-      const clubPath = `clubs/${organisingClubId}.json`;
-      const club = await readJson(getPrivateBlobClient(clubPath), ClubRefSchema, clubPath);
-      organisingClub = { id: club.id, name: club.name };
-    } catch (err: unknown) {
-      if ((err as { statusCode?: number }).statusCode === 404) {
-        throw new HttpError(400, "CLUB_NOT_FOUND", "Organising club not found");
+      const { date, siteId, seasonYear } = body;
+      if (!date || !siteId || !seasonYear) {
+        throw new HttpError(400, "INVALID_BODY", "date, siteId, and seasonYear are required");
       }
-      throw new HttpError(500, "INTERNAL");
-    }
-  }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        throw new HttpError(400, "INVALID_DATE", "date must be yyyy-MM-dd");
+      }
 
-  const id = randomUUID();
-  // Lifecycle invariant: a round is ALWAYS created Proposed. Accepting any other
-  // status here would let a caller skip the freeze lifecycle (confirm →
-  // brief-complete → lock), so a provided status is honoured only when it
-  // normalizes to Proposed; anything else (or an unknown value) is a 400.
-  if (body.status !== undefined) {
-    let requested: RoundStatus;
-    try {
-      requested = normalizeStatus(body.status);
-    } catch (err: unknown) {
-      const message = (err as { message?: string }).message ?? "Unknown status";
-      return {
-        status: 400,
-        jsonBody: { error: "Invalid status", code: "INVALID_STATUS", detail: message },
-      };
-    }
-    if (requested !== "Proposed") {
-      return {
-        status: 400,
-        jsonBody: {
-          error: "Invalid status",
-          code: "INVALID_STATUS",
-          detail: `Rounds must be created with status Proposed (received ${requested})`,
-        },
-      };
-    }
-  }
-  const round: Round = {
-    id,
-    date,
-    status: "Proposed",
-    isLocked: false,
-    maxTeams: body.maxTeams ?? 8,
-    minimumScore: body.minimumScore ?? 0,
-    site: {
-      id: site.id,
-      name: site.name,
-      parkingW3W: site.parkingW3W,
-      briefingW3W: site.briefingW3W,
-      takeOffW3W: site.takeOffW3W,
+      // A non-admin coord may only organise rounds for their own club, and must have one.
+      const isAdmin = c.caller.roles.includes("Admin");
+      if (!isAdmin && !c.caller.clubId) {
+        // Old message "Your account is not linked to a club"; withErrorHandler
+        // (http.ts:91-101) always dropped it, so the bare 403 is byte-identical.
+        throw new HttpError(403, "FORBIDDEN");
+      }
+      if (!isAdmin && body.organisingClubId && body.organisingClubId !== c.caller.clubId) {
+        // Old message "You can only create rounds for your own club"; likewise
+        // always dropped by withErrorHandler.
+        throw new HttpError(403, "FORBIDDEN");
+      }
+      organisingClubId = isAdmin ? body.organisingClubId : (c.caller.clubId ?? undefined);
     },
-    organisingClub,
-    season: { year: Number(seasonYear) },
-    teams: [],
-  };
+    mutate: async () => {
+      const { date, siteId, seasonYear } = body;
 
-  // Write primary round blob
-  await writePrivateJson(`rounds/${id}.json`, RoundSchema, round);
-
-  // Append round ID to season (with lease for atomicity)
-  try {
-    await withLease(`seasons/${seasonYear}.json`, async (leaseId) => {
-      const seasonPath = `seasons/${seasonYear}.json`;
-      const s = await readJson(getBlobClient(seasonPath), SeasonSchema, seasonPath);
-      if (!s.rounds.includes(id)) {
-        s.rounds.push(id);
+      // Load site
+      let site: Site;
+      try {
+        const sitePath = `sites/${siteId}.json`;
+        site = await readJson(getPrivateBlobClient(sitePath), SiteSchema, sitePath);
+      } catch (err: unknown) {
+        if ((err as { statusCode?: number }).statusCode === 404) {
+          throw new HttpError(400, "INVALID_BODY", "Site not found");
+        }
+        throw new HttpError(500, "INTERNAL");
       }
-      await writeJson(seasonPath, SeasonSchema, s, leaseId);
-    });
-  } catch {
-    // Season blob just checked to exist — this should not fail; best-effort
-    season.rounds.push(id);
-    await writeJson(`seasons/${seasonYear}.json`, SeasonSchema, season);
-  }
 
-  // Update rounds.json index
-  await updateRoundsIndex(round);
+      // Load season (must exist)
+      let season: Season;
+      try {
+        const seasonPath = `seasons/${seasonYear}.json`;
+        season = await readJson(getBlobClient(seasonPath), SeasonSchema, seasonPath);
+      } catch (err: unknown) {
+        if ((err as { statusCode?: number }).statusCode === 404) {
+          throw new HttpError(400, "INVALID_BODY", "Season not found");
+        }
+        throw new HttpError(500, "INTERNAL");
+      }
 
-  // Seed the brief at creation so coordinators land on a populated brief-edit UI.
-  // Best-effort: a failure MUST NOT fail the round create — the brief is
-  // recoverable via lazy-create on first edit/image (T6/T9). ifNoneMatch:"*" is
-  // atomic create-or-skip, so it never clobbers a brief that already exists.
-  try {
-    const brief = await buildInitialBrief(round, {
-      briefingTime: body.briefingTime,
-      checkInByTime: body.checkInByTime,
-      landByTime: body.landByTime,
-    });
-    await writePrivateJson(`round-briefs/${id}.json`, BriefSchema, brief, undefined, {
-      ifNoneMatch: "*",
-    });
-  } catch (briefErr) {
-    ctx.warn(`[createRound:${id}] Eager brief creation failed (recoverable):`, briefErr);
-    getTelemetryClient()?.trackTrace({
-      message: "brief.eagerCreateFailed",
-      properties: { roundId: id },
-    });
-  }
+      let organisingClub: { id: string; name: string } | undefined;
+      if (organisingClubId) {
+        try {
+          const clubPath = `clubs/${organisingClubId}.json`;
+          const club = await readJson(getPrivateBlobClient(clubPath), ClubRefSchema, clubPath);
+          organisingClub = { id: club.id, name: club.name };
+        } catch (err: unknown) {
+          if ((err as { statusCode?: number }).statusCode === 404) {
+            throw new HttpError(400, "CLUB_NOT_FOUND", "Organising club not found");
+          }
+          throw new HttpError(500, "INTERNAL");
+        }
+      }
 
-  return { status: 201, jsonBody: round };
+      const id = randomUUID();
+      // Lifecycle invariant: a round is ALWAYS created Proposed. Accepting any other
+      // status here would let a caller skip the freeze lifecycle (confirm →
+      // brief-complete → lock), so a provided status is honoured only when it
+      // normalizes to Proposed; anything else (or an unknown value) is a 400.
+      if (body.status !== undefined) {
+        let requested: RoundStatus;
+        try {
+          requested = normalizeStatus(body.status);
+        } catch (err: unknown) {
+          const message = (err as { message?: string }).message ?? "Unknown status";
+          throw new HttpError(400, "INVALID_STATUS", message);
+        }
+        if (requested !== "Proposed") {
+          throw new HttpError(
+            400,
+            "INVALID_STATUS",
+            `Rounds must be created with status Proposed (received ${requested})`,
+          );
+        }
+      }
+      const round: Round = {
+        id,
+        date: date!,
+        status: "Proposed",
+        isLocked: false,
+        maxTeams: body.maxTeams ?? 8,
+        minimumScore: body.minimumScore ?? 0,
+        site: {
+          id: site.id,
+          name: site.name,
+          parkingW3W: site.parkingW3W,
+          briefingW3W: site.briefingW3W,
+          takeOffW3W: site.takeOffW3W,
+        },
+        organisingClub,
+        season: { year: Number(seasonYear) },
+        teams: [],
+      };
+
+      // Write primary round blob
+      await writePrivateJson(`rounds/${id}.json`, RoundSchema, round);
+
+      // Append round ID to season (with lease for atomicity)
+      try {
+        await withLease(`seasons/${seasonYear}.json`, async (leaseId) => {
+          const seasonPath = `seasons/${seasonYear}.json`;
+          const s = await readJson(getBlobClient(seasonPath), SeasonSchema, seasonPath);
+          if (!s.rounds.includes(id)) {
+            s.rounds.push(id);
+          }
+          await writeJson(seasonPath, SeasonSchema, s, leaseId);
+        });
+      } catch {
+        // Season blob just checked to exist — this should not fail; best-effort
+        season.rounds.push(id);
+        await writeJson(`seasons/${seasonYear}.json`, SeasonSchema, season);
+      }
+
+      return round;
+    },
+    after: async (round) => {
+      // Seed the brief at creation so coordinators land on a populated brief-edit UI.
+      // Best-effort: a failure MUST NOT fail the round create — the brief is
+      // recoverable via lazy-create on first edit/image (T6/T9). ifNoneMatch:"*" is
+      // atomic create-or-skip, so it never clobbers a brief that already exists.
+      try {
+        const brief = await buildInitialBrief(round, {
+          briefingTime: body.briefingTime,
+          checkInByTime: body.checkInByTime,
+          landByTime: body.landByTime,
+        });
+        await writePrivateJson(`round-briefs/${round.id}.json`, BriefSchema, brief, undefined, {
+          ifNoneMatch: "*",
+        });
+      } catch (briefErr) {
+        ctx.warn(`[createRound:${round.id}] Eager brief creation failed (recoverable):`, briefErr);
+        getTelemetryClient()?.trackTrace({
+          message: "brief.eagerCreateFailed",
+          properties: { roundId: round.id },
+        });
+      }
+    },
+  });
 }
 
 // ─── PUT /api/rounds/{id} ─────────────────────────────────────────────────────
 
-async function updateRound(
+/** The update request body. All fields optional; lifecycle fields are ignored. */
+interface UpdateRoundBody {
+  date?: string;
+  siteId?: string;
+  organisingClubId?: string;
+  maxTeams?: number;
+  minimumScore?: number;
+}
+
+function updateRound(
   req: HttpRequest,
-  _ctx: InvocationContext
+  ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
+  // Per-invocation closure state: `scope` parses the body, `mutate` reads it.
+  // Module-level state here would race across concurrent invocations — each
+  // call must get its own binding (see createRound above).
+  let body!: UpdateRoundBody;
 
-  const id = req.params["id"];
-  if (!id) throw new HttpError(400, "MISSING_ROUND_ID", "Missing round id");
-
-  await assertManageableRound(caller, id);
-
-  const body = (await req.json()) as {
-    date?: string;
-    siteId?: string;
-    organisingClubId?: string;
-    maxTeams?: number;
-    minimumScore?: number;
-  };
-
-  if (
-    !caller.roles.includes("Admin") &&
-    body.organisingClubId &&
-    body.organisingClubId !== caller.clubId
-  ) {
-    return forbiddenResponse("You can only assign rounds to your own club");
-  }
-
-  await mutationRateLimit(req, caller, "updateRound", "standard");
-
-  const path = `rounds/${id}.json`;
-  let updated: Round;
-  let dateChanged = false;
-
-  try {
-    updated = await withPrivateLease(path, async (leaseId) => {
-      const r = await readJson(getPrivateBlobClient(path), RoundSchema, path);
-
+  return applyRoundWrite(req, ctx, "update", {
+    scope: async (c) => {
+      body = (await c.req.json()) as UpdateRoundBody;
+      if (
+        !c.caller.roles.includes("Admin") &&
+        body.organisingClubId &&
+        body.organisingClubId !== c.caller.clubId
+      ) {
+        // Old message "You can only assign rounds to your own club";
+        // withErrorHandler (http.ts:91-101) always dropped it, so the bare
+        // 403 is byte-identical.
+        throw new HttpError(403, "FORBIDDEN");
+      }
+    },
+    gate: (c) => {
       // Cancelled first: isRosterFrozen("Cancelled") is true as well, and the
       // cancelled rejection must stay distinguishable from the frozen one.
-      if (r.status === "Cancelled") {
-        throw new HttpError(409, "ROUND_CANCELLED", "Round is cancelled — uncancel before editing");
+      if (c.round.status === "Cancelled") {
+        throw new HttpError(
+          409,
+          "ROUND_CANCELLED",
+          "Round is cancelled — uncancel before editing",
+        );
       }
 
       // The Fixture — when the round is held, where, who hosts it and how many
@@ -370,13 +352,17 @@ async function updateRound(
       // rule the roster uses. By then everyone is standing on the hill and the
       // brief pilots signed against describes this site. A round arranged wrongly
       // is cancelled and re-scheduled, never re-pointed. (CONTEXT.md: Fixture)
-      if (isRosterFrozen(r.status)) {
+      if (isRosterFrozen(c.round.status)) {
         throw new HttpError(
           409,
           "CONFLICT",
-          `Cannot change the round's date, site, organising club or capacity while ${rosterFrozenReason(r.status)}`,
+          `Cannot change the round's date, site, organising club or capacity while ${rosterFrozenReason(c.round.status)}`,
         );
       }
+    },
+    mutate: async (c) => {
+      let dateChanged = false;
+      const r = c.round;
 
       if (body.date && body.date !== r.date) {
         dateChanged = true;
@@ -439,38 +425,21 @@ async function updateRound(
         );
         scored.scoring = { scoredAt: new Date().toISOString(), ...derivation };
       }
-
-      await writePrivateJson(path, RoundSchema, r, leaseId);
-      return r;
-    });
-  } catch (err: unknown) {
-    if (err instanceof HttpError) throw err;
-    const e = err as { statusCode?: number };
-    if (e.statusCode === 404) throw new HttpError(404, "NOT_FOUND", "Round not found");
-    throw new HttpError(500, "INTERNAL");
-  }
-
-  await updateRoundsIndex(updated);
-  return { status: 200, jsonBody: updated };
+      // The executor persists `c.round` (mutated in place above) and republishes.
+    },
+  });
 }
 
 // ─── POST /api/rounds/{id}/confirm ────────────────────────────────────────────
 
-async function confirmRound(
+function confirmRound(
   req: HttpRequest,
-  _ctx: InvocationContext
+  ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  return { status: 200, jsonBody: await applyRoundTransition(req, "confirm") };
+  return applyRoundWrite(req, ctx, "confirm");
 }
 
 // ─── POST /api/rounds/{id}/brief-complete ─────────────────────────────────────
-
-interface CompleteBriefContext {
-  briefTeams: BriefTeamEntry[];
-  callerUserId: string;
-  roundLeaseId: string;
-  briefLeaseId: string;
-}
 
 /**
  * Every Filled round slot must be snapshot-able — i.e. present in
@@ -563,52 +532,6 @@ function freezeBriefAndCountInvalidations(
   return invalidatedSignatureCount;
 }
 
-/**
- * The atomic brief-complete body (R8) — runs as ONE unit under the round+brief
- * leases acquired by withRoundAndBriefLease. It MUST NOT be split into separate
- * transactions. In order:
- *   1. Refresh NON-material derived metadata (teams/date/siteName/club/PureTrack
- *      names) so downstream PDF/email never read stale copies. None of these are
- *      MATERIAL_BRIEF_FIELDS, so the freeze hash is unaffected.
- *   2. Freeze the material hash: the first freeze sets `hash` and keeps
- *      `version`; a material change archives the prior {version, hash, createdAt,
- *      createdBy, supersededAt} onto versionHistory (ALL BriefVersionSchema
- *      required fields), bumps `version`, and sets the new hash.
- *   3. Persist the frozen brief JSON (PDF generation stays OUTSIDE the lease).
- *   4. ALWAYS invalidate prior sign-to-fly flags keyed on the now-current brief
- *      version (retry-safe — NOT gated on whether THIS call bumped), then persist
- *      the flag resets onto the round.
- * Steps 1-2 + the invalidation-count of 4 are delegated to
- * freezeBriefAndCountInvalidations (shared with the dryRun preview); this
- * function adds the persistence (brief-before-round preserves the R8 write order).
- * Returns the number of signatures invalidated by this call.
- */
-async function completeBriefTransaction(
-  round: Round,
-  brief: RoundBrief,
-  signatures: Signature[],
-  ctx: CompleteBriefContext,
-): Promise<number> {
-  const invalidatedSignatureCount = freezeBriefAndCountInvalidations(
-    round,
-    brief,
-    signatures,
-    ctx.briefTeams,
-    ctx.callerUserId,
-  );
-
-  await writePrivateJson(
-    `round-briefs/${round.id}.json`,
-    BriefSchema,
-    brief,
-    ctx.briefLeaseId,
-  );
-
-  await writePrivateJson(`rounds/${round.id}.json`, RoundSchema, round, ctx.roundLeaseId);
-
-  return invalidatedSignatureCount;
-}
-
 /** Slots currently signed (signToFly === true) — the reopen dryRun's at-risk count. */
 function countCurrentlySignedSlots(round: Round): number {
   let count = 0;
@@ -624,105 +547,58 @@ function countCurrentlySignedSlots(round: Round): number {
  * POST /api/rounds/{id}/brief-complete — Confirmed → BriefComplete.
  *
  * The Confirmed→BriefComplete transition that FREEZES the brief and invalidates
- * stale sign-to-fly flags. The freeze body runs UNDER the round lease with the
- * brief lease NESTED (B3) via withRoundAndBriefLease so the brief write is
- * covered atomically.
+ * stale sign-to-fly flags, run by the `roundAndBrief` lease strategy in
+ * lib/roundTransitions.ts (the R8 brief-before-round write order lives there).
  *
  * G2 (BLOCKING): the brief MUST already exist — this safety path never
- * lazy-creates one (and you cannot lease a missing blob). Aborts 409 if the
- * brief is absent (`BRIEF_REQUIRED`) or the roster is incomplete (a Filled slot
- * is not snapshot-able). Responds with the round plus `invalidatedSignatureCount`.
+ * lazy-creates one (and you cannot lease a missing blob). The `gate` hook
+ * aborts 409 `BRIEF_REQUIRED` if the brief is absent; `assertRosterComplete`
+ * aborts 409 if a Filled slot is not snapshot-able. Responds with the round
+ * plus `invalidatedSignatureCount`.
  */
-async function briefCompleteRound(
+function briefCompleteRound(
   req: HttpRequest,
-  _ctx: InvocationContext
+  ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  const id = req.params["id"];
-  if (!id) throw new HttpError(400, "MISSING_ROUND_ID", "Missing round id");
+  // Per-invocation closure state: gate() sets preBrief, preview() reads it.
+  // Function-scoped — NEVER module scope (see createRound above).
+  let preBrief!: RoundBrief;
 
-  const dryRun = req.query.get("dryRun") === "true";
-
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
-  await assertManageableRound(caller, id);
-  await mutationRateLimit(req, caller, "briefCompleteRound", "standard");
-
-  const roundPath = `rounds/${id}.json`;
-
-  // G2: brief must exist before the lease — withRoundAndBriefLease cannot lease
-  // a missing brief blob, and this safety path never lazy-creates one.
-  let preRound: Round;
-  try {
-    preRound = await readJson(getPrivateBlobClient(roundPath), RoundSchema, roundPath);
-  } catch (err: unknown) {
-    if ((err as { statusCode?: number }).statusCode === 404) {
-      throw new HttpError(404, "NOT_FOUND", "Round not found");
-    }
-    throw new HttpError(500, "INTERNAL");
-  }
-  if (preRound.status !== "Confirmed") {
-    throw new HttpError(409, "CONFLICT", `Expected status Confirmed, got ${preRound.status}`);
-  }
-  const preBrief = await readExistingBriefForLock(id);
-  if (!preBrief) {
-    throw new HttpError(409, "BRIEF_REQUIRED", "A brief must exist before brief-complete");
-  }
-
-  // dryRun preview: same preconditions, but compute the count on CLONES so
-  // nothing persists (freezeBriefAndCountInvalidations MUTATES its args). Powers
-  // the RoundManage confirm modal without transitioning on modal-open.
-  if (dryRun) {
-    const briefTeams = await buildBriefTeams(preRound);
-    assertRosterComplete(preRound, briefTeams);
-    const signatures = await listSignaturesForRound(id);
-    const invalidatedSignatureCount = freezeBriefAndCountInvalidations(
-      structuredClone(preRound),
-      structuredClone(preBrief),
-      signatures,
-      briefTeams,
-      caller.userId,
-    );
-    return { status: 200, jsonBody: { invalidatedSignatureCount } };
-  }
-
-  let updatedRound: Round;
-  let invalidatedSignatureCount: number;
-  try {
-    const result = await withRoundAndBriefLease(id, async (roundLeaseId, briefLeaseId) => {
-      const r = await readJson(getPrivateBlobClient(roundPath), RoundSchema, roundPath);
-      if (r.status !== "Confirmed") {
-        throw new HttpError(409, "CONFLICT", `Expected status Confirmed, got ${r.status}`);
+  return applyRoundWrite(req, ctx, "briefComplete", {
+    gate: async ({ id }) => {
+      const brief = await readExistingBriefForLock(id);
+      if (!brief) {
+        throw new HttpError(409, "BRIEF_REQUIRED", "A brief must exist before brief-complete");
       }
-      const briefPath = `round-briefs/${id}.json`;
-      const brief = await readJson(getPrivateBlobClient(briefPath), BriefSchema, briefPath);
-
-      // Roster completeness BEFORE any write — every Filled slot must be
-      // snapshot-able so pilots can be safely frozen before signing.
-      const briefTeams = await buildBriefTeams(r);
-      assertRosterComplete(r, briefTeams);
-
-      r.status = "BriefComplete";
-      const signatures = await listSignaturesForRound(id);
-      const count = await completeBriefTransaction(r, brief, signatures, {
+      preBrief = brief;
+    },
+    preview: async (c) => {
+      const briefTeams = await buildBriefTeams(c.round);
+      assertRosterComplete(c.round, briefTeams);
+      const signatures = await listSignaturesForRound(c.id);
+      const invalidatedSignatureCount = freezeBriefAndCountInvalidations(
+        structuredClone(c.round),
+        structuredClone(preBrief),
+        signatures,
         briefTeams,
-        callerUserId: caller.userId,
-        roundLeaseId,
-        briefLeaseId,
-      });
-      return { round: r, count };
-    });
-    updatedRound = result.round;
-    invalidatedSignatureCount = result.count;
-  } catch (err: unknown) {
-    if (err instanceof HttpError) throw err;
-    const e = err as { statusCode?: number };
-    if (e.statusCode === 404) throw new HttpError(404, "NOT_FOUND", "Round not found");
-    throw new HttpError(500, "INTERNAL");
-  }
-
-  await updateRoundsIndex(updatedRound);
-  return { status: 200, jsonBody: { ...updatedRound, invalidatedSignatureCount } };
+        c.caller.userId,
+      );
+      return { invalidatedSignatureCount };
+    },
+    mutate: async (c) => {
+      const briefTeams = await buildBriefTeams(c.round);
+      assertRosterComplete(c.round, briefTeams);
+      const signatures = await listSignaturesForRound(c.id);
+      return freezeBriefAndCountInvalidations(
+        c.round,
+        c.brief!,
+        signatures,
+        briefTeams,
+        c.caller.userId,
+      );
+    },
+    respond: (round, count) => ({ ...round, invalidatedSignatureCount: count }),
+  });
 }
 
 // ─── POST /api/rounds/{id}/reopen ─────────────────────────────────────────────
@@ -736,60 +612,16 @@ async function briefCompleteRound(
  * version bump). The response mirrors brief-complete by carrying
  * `invalidatedSignatureCount` (always 0 — reopen invalidates nothing).
  */
-async function reopenBrief(
+function reopenBrief(
   req: HttpRequest,
-  _ctx: InvocationContext
+  ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  const id = req.params["id"];
-  if (!id) throw new HttpError(400, "MISSING_ROUND_ID", "Missing round id");
-
-  const dryRun = req.query.get("dryRun") === "true";
-
-  // dryRun preview: validate BriefComplete (409 otherwise, matching the real
-  // transition) and report how many currently-signed slots the reopen puts at
-  // risk, WITHOUT changing status. Powers the RoundManage confirm modal.
-  //
-  // It carries its OWN auth preamble because it never reaches
-  // applyRoundTransition. Keeping the preamble here rather than above the
-  // branch is what stops the real path charging the reopenBrief bucket twice
-  // (30/min would become 15/min) — each path charges exactly one token.
-  if (dryRun) {
-    const caller = await getCallerIdentity(req);
-    if (!caller) return unauthorizedResponse();
-    if (!isCoord(caller.roles)) return forbiddenResponse();
-    await assertManageableRound(caller, id);
-    await mutationRateLimit(req, caller, "reopenBrief", "standard");
-
-    const path = `rounds/${id}.json`;
-    let round: Round;
-    try {
-      round = await readJson(getPrivateBlobClient(path), RoundSchema, path);
-    } catch (err: unknown) {
-      if ((err as { statusCode?: number }).statusCode === 404) {
-        throw new HttpError(404, "NOT_FOUND", "Round not found");
-      }
-      throw new HttpError(500, "INTERNAL");
-    }
-    if (!ROUND_TRANSITIONS.reopen.from.includes(round.status)) {
-      throw new HttpError(
-        409,
-        "CONFLICT",
-        expectedStatusDetail(ROUND_TRANSITIONS.reopen.from, round.status),
-      );
-    }
-    return {
-      status: 200,
-      jsonBody: { invalidatedSignatureCount: countCurrentlySignedSlots(round) },
-    };
-  }
-
-  return {
-    status: 200,
-    jsonBody: {
-      ...(await applyRoundTransition(req, "reopen")),
-      invalidatedSignatureCount: 0,
-    },
-  };
+  return applyRoundWrite(req, ctx, "reopen", {
+    preview: ({ round }) => ({
+      invalidatedSignatureCount: countCurrentlySignedSlots(round),
+    }),
+    respond: (round) => ({ ...round, invalidatedSignatureCount: 0 }),
+  });
 }
 
 // ─── POST /api/rounds/{id}/lock ───────────────────────────────────────────────
@@ -1233,56 +1065,45 @@ async function lockRound(
   return { status: 200, jsonBody: updated };
 }
 
-async function unlockRound(
+/**
+ * Locked → Confirmed. Clears the PureTrack echo fields, the lock-time pilot
+ * snapshots (re-taken at next lock) and the brief PDF state; the executor sets
+ * `round.status = "Confirmed"` and republishes. Runs on the `pureTrackEchoes`
+ * strategy: `mutatePureTrackEchoes` owns the lease/clone/write/rollback, and
+ * the only status gate is the in-callback `assertFrom` (no pre-lease check).
+ */
+function unlockRound(
   req: HttpRequest,
-  _ctx: InvocationContext
+  ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  const id = req.params["id"];
-  if (!id) throw new HttpError(400, "MISSING_ROUND_ID", "Missing round id");
-
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
-  await assertManageableRound(caller, id);
-  await mutationRateLimit(req, caller, "unlockRound", "standard");
-
-  let updated: Round | undefined;
-  await mutatePureTrackEchoes(id, ({ round, brief }) => {
-    if (round.status !== "Locked") {
-      throw new HttpError(
-        409,
-        "CONFLICT",
-        `Expected status Locked, got ${round.status}`,
-      );
-    }
-    if (round.pureTrack?.status === "pending" || round.pureTrack?.status === "processing") {
-      throw new HttpError(
-        409,
-        "PURETRACK_IN_PROGRESS",
-        "PureTrack group creation must finish before unlocking the round",
-      );
-    }
-    round.status = "Confirmed";
-    round.pureTrack = undefined;
-    round.isLocked = false;
-    if (round.brief) {
-      round.brief.pdfStatus = undefined;
-      round.brief.pdfError = undefined;
-      round.brief.pdfAttemptId = undefined;
-    }
-    // Clear snapshots so they are re-taken at next lock
-    for (const team of round.teams) {
-      for (const slot of team.pilots) {
-        slot.snapshot = null;
+  return applyRoundWrite(req, ctx, "unlock", {
+    gate: (c) => {
+      if (c.round.pureTrack?.status === "pending" || c.round.pureTrack?.status === "processing") {
+        throw new HttpError(
+          409,
+          "PURETRACK_IN_PROGRESS",
+          "PureTrack group creation must finish before unlocking the round",
+        );
       }
-    }
-    clearPureTrackEchoes(round, brief);
-    updated = round;
-    return true;
+    },
+    mutate: (c) => {
+      const { round, brief } = c;
+      round.pureTrack = undefined;
+      round.isLocked = false;
+      if (round.brief) {
+        round.brief.pdfStatus = undefined;
+        round.brief.pdfError = undefined;
+        round.brief.pdfAttemptId = undefined;
+      }
+      // Clear snapshots so they are re-taken at next lock
+      for (const team of round.teams) {
+        for (const slot of team.pilots) {
+          slot.snapshot = null;
+        }
+      }
+      clearPureTrackEchoes(round, brief!);
+    },
   });
-  if (updated === undefined) throw new HttpError(500, "INTERNAL");
-  await updateRoundsIndex(updated);
-  return { status: 200, jsonBody: updated };
 }
 
 // ─── POST /api/rounds/{id}/cancel ─────────────────────────────────────────────
@@ -1291,11 +1112,11 @@ async function unlockRound(
  * Proposed | Confirmed → Cancelled. A cancelled round accepts no field edits;
  * updateRoundsIndex republishes the Cancelled status to the public rounds blob.
  */
-async function cancelRound(
+function cancelRound(
   req: HttpRequest,
-  _ctx: InvocationContext
+  ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  return { status: 200, jsonBody: await applyRoundTransition(req, "cancel") };
+  return applyRoundWrite(req, ctx, "cancel");
 }
 
 // ─── POST /api/rounds/{id}/uncancel ───────────────────────────────────────────
@@ -1303,11 +1124,11 @@ async function cancelRound(
 /**
  * Cancelled → Proposed. Republishes the restored status to the public blob.
  */
-async function uncancelRound(
+function uncancelRound(
   req: HttpRequest,
-  _ctx: InvocationContext
+  ctx: InvocationContext
 ): Promise<HttpResponseInit> {
-  return { status: 200, jsonBody: await applyRoundTransition(req, "uncancel") };
+  return applyRoundWrite(req, ctx, "uncancel");
 }
 
 // ─── POST /api/rounds/{id}/complete ───────────────────────────────────────────
