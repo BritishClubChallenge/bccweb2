@@ -154,7 +154,15 @@ export function expectedStatusDetail(
   return `Expected status ${from.join(" or ")}, got ${actual}`;
 }
 
-/** Everything a hook needs: the request-scoped values plus the leased round. */
+/**
+ * Everything a hook needs: the request-scoped values plus the round. Whether
+ * `round` is LEASED depends on the hook and strategy: preview and
+ * strategy-preamble hooks (`scope`/`gate` on `roundAndBrief` and
+ * `pureTrackEchoes`, and every preview-path hook) receive the UNLEASED
+ * pre-read; `mutate` and the `round` strategy's in-lease hooks receive the
+ * fresh leased read. Hooks must not rely on the lease being held unless they
+ * run under one.
+ */
 export interface RoundWriteContext {
   readonly req: HttpRequest;
   readonly ctx: InvocationContext;
@@ -162,10 +170,12 @@ export interface RoundWriteContext {
   readonly id: string;
   readonly round: Round;
   /**
-   * The FRESH, leased brief read — populated ONLY for the `roundAndBrief`
-   * (and later `pureTrackEchoes`) lease strategies, and ONLY on the context
-   * passed to `mutate`. `undefined` for `round`-lease writes and for the
-   * preview path (the preview works on the handler's own pre-read instead).
+   * The FRESH, leased brief read — populated ONLY by the `roundAndBrief` and
+   * `pureTrackEchoes` lease strategies. `roundAndBrief` sets it solely on the
+   * `mutate` context; `pureTrackEchoes` builds one context for its whole
+   * in-callback chain, so its `gate` sees the leased brief too. Always
+   * `undefined` for `round`-lease writes and on every preview path (the
+   * preview works on the handler's own unleased pre-read instead).
    */
   readonly brief?: RoundBrief;
 }
@@ -274,7 +284,11 @@ async function chargeLimiter(
   caller: CallerIdentity,
   spec: RoundWriteSpec
 ): Promise<void> {
-  // DELIBERATELY INSIDE THE LEASE — do not hoist this into the handler.
+  // DELIBERATELY INSIDE THE LEASE in the `round` strategy (its ONLY call
+  // site there) — do not hoist this into the handler. The other strategies
+  // call it from their UNLEASED preambles instead (see runRoundAndBriefWrite /
+  // runPureTrackEchoesWrite): they read the round before the lease, so the
+  // scope check and the limiter both resolve pre-lease there.
   // rateLimit.ts:138-164 requires the scope check to resolve BEFORE the
   // limiter ("a forbidden caller must get 403, never 429"), and the scope
   // check needs the round. Reading the round once means the scope check
