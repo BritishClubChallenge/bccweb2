@@ -16,9 +16,9 @@ of them.
 If these files don't exist, **proceed silently**. Don't flag their absence; don't suggest
 creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and
 `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get
-resolved. Neither exists yet in this repo.
+resolved. `CONTEXT.md` exists; `docs/adr/` does not yet.
 
-Until `CONTEXT.md` exists, the working domain vocabulary lives in the `AGENTS.md` files —
+`CONTEXT.md` holds the domain vocabulary; the mechanics live in the `AGENTS.md` files —
 [root](../../AGENTS.md), [apps/api](../../apps/api/AGENTS.md),
 [apps/api/src/lib](../../apps/api/src/lib/AGENTS.md),
 [apps/api/src/functions](../../apps/api/src/functions/AGENTS.md),
