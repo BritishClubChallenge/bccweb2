@@ -1127,10 +1127,11 @@ describe("unlockRound responses (issue 277)", () => {
     expect(ROUNDS_MUTATE_SOURCE).not.toContain("assertManageableRound");
   });
 
-  it("structural: ROUND_WRITES has exactly the nine keys (#276 adds complete)", () => {
+  it("structural: ROUND_WRITES has exactly the ten keys", () => {
     expect(Object.keys(writes ?? {}).sort()).toEqual([
       "briefComplete",
       "cancel",
+      "complete",
       "confirm",
       "create",
       "lock",
@@ -1179,6 +1180,46 @@ describe("lockRound on the round write table (issue 275)", () => {
     expect(
       ROUND_TRANSITIONS_SOURCE.split('"puretrack.crossBlobReconcileRequired"')
         .length - 1,
+    ).toBe(1);
+  });
+});
+
+// ─── (m) completeRound on the round write table (issue 276, red-first) ───────
+
+describe("completeRound on the round write table (issue 276)", () => {
+  it("m1 ROUND_WRITES.complete equals its row", () => {
+    expect(writes?.["complete"]).toEqual({
+      kind: "transition",
+      from: ["Locked"],
+      to: "Complete",
+      lease: "roundRenewing",
+      endpoint: "completeRound",
+      tier: "heavy",
+    });
+  });
+
+  it("m2 completeRound delegates to applyRoundWrite and holds no preamble tokens", () => {
+    const body = handlerSource(ROUNDS_MUTATE_SOURCE, "completeRound");
+    expect(body).toContain("applyRoundWrite(");
+    for (const token of PREAMBLE_TOKENS) {
+      expect(body).not.toContain(token);
+    }
+  });
+
+  // With all ten writes on the table, roundsMutate.ts holds hooks and helpers
+  // only, so no round-write preamble may reappear anywhere in it.
+  it("m3 roundsMutate.ts holds no round-write preamble at all", () => {
+    for (const token of PREAMBLE_TOKENS) {
+      expect(ROUNDS_MUTATE_SOURCE).not.toContain(token);
+    }
+    expect(ROUNDS_MUTATE_SOURCE).not.toContain(
+      "Round must be Locked to complete",
+    );
+  });
+
+  it("m4 roundTransitions.ts contains exactly one withPrivateLeaseRenewing(", () => {
+    expect(
+      ROUND_TRANSITIONS_SOURCE.split("withPrivateLeaseRenewing(").length - 1,
     ).toBe(1);
   });
 });
