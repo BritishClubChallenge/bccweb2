@@ -24,24 +24,26 @@ gotchas, and root [AGENTS.md](../../../../AGENTS.md) for the overall architectur
 - Throw `HttpError(status, code, detail?)` for expected failures → normalized to
   `{ error, code, requestId, detail? }` by `withErrorHandler` ([../lib/http.ts](../lib/http.ts)).
 - `BlobShapeError` → `500 { error:"DATA_SHAPE_INVALID", path, schema }` (no field values).
-- Local validation may still `return` an explicit `409/400` jsonBody (see `roundsMutate.ts`).
+- Local validation may still `return` an explicit `409/400` jsonBody (see `rescoreRound.ts`).
+  `withErrorHandler` keeps only its `code` and `detail` and replaces `error` with the status
+  text, so put the human-readable message in `detail` (or throw `HttpError`).
 
 ## Mutations + leases
 
 - Private read-modify-write → `withPrivateLease(...)`; long work → `withPrivateLeaseRenewing(...)`.
 - Public blob RMW → `withLease(...)`. Keep PDF/email/PureTrack work **outside** the lease.
-- Round finalize MUST `updateRoundsIndex(...)`. The nine writes routed through
-  `applyRoundWrite` get this from the executor, which republishes once for all of them;
+- Round finalize MUST `updateRoundsIndex(...)`. All ten round writes are routed through
+  `applyRoundWrite` and get this from the executor, which republishes once for all of them;
   they must NOT call it themselves (a second call site breaks the single-occurrence
-  contract test). `completeRound` still calls it directly (pending #276), then fires
-  `recomputeSeason(year)` best-effort *after* the response.
+  contract test). Complete's best-effort `recomputeSeason(year)` is its `afterResponse`
+  hook, started after the republish and never awaited.
 - `seasonClubs.ts` uses a `.lock` sentinel + renewing lease for multi-blob mutations.
 
 ## File map (non-obvious)
 
 | File | Why it's big / special |
 |------|------------------------|
-| `roundsMutate.ts` (1276) | 10 endpoints: create/update/confirm/brief-complete/reopen/lock/unlock/cancel/uncancel/complete + brief/PureTrack/PDF/email helpers; nine of them (all but complete) are rows in `ROUND_WRITES` ([`../lib/roundTransitions.ts`](../lib/roundTransitions.ts)) and the handlers here are one-liners over `applyRoundWrite` plus their hooks (lock's snapshot, gate and enqueue helpers sit beside it); `completeRound` remains bespoke pending #276 |
+| `roundsMutate.ts` (1227) | 10 endpoints: create/update/confirm/brief-complete/reopen/lock/unlock/cancel/uncancel/complete + brief/PureTrack/PDF/email/scoring helpers; all ten are rows in `ROUND_WRITES` ([`../lib/roundTransitions.ts`](../lib/roundTransitions.ts)) and the handlers here are one-liners over `applyRoundWrite` plus their hooks (lock's snapshot, gate and enqueue helpers and complete's accounted-for gate sit beside them) |
 | `puretrackGroups.ts` | queue-trigger consumer for `round-puretrack-group` (+ `-poison`); replaces-then-creates a round's PureTrack groups under a global mutation guard, commits via `commitPureTrackReady` |
 | `igcValidationWorker.ts` | queue-trigger consumer for `igc-validation`; guards/paces FAI calls, durably replays results, and applies validation under the round lease |
 | `teams.ts` | team + pilot slot management; `addPilot` hard-blocks wrong/absent season club (`422 TEAM_CLUB_MISMATCH` / `422 NO_CLUB_FOR_SEASON`) — no Admin override; see `docs/runbooks/round-club-pilot-decision.md` |
