@@ -126,7 +126,8 @@ export const SCOPED_CASES: readonly CallSiteCase[] = [
   // rather than coord-coarse on purpose: the coarse `isCoord` gate runs outside
   // the lease and would prove nothing about the ordering this file exists to
   // pin. Only a RoundsCoord who CLEARS the coarse gate reaches
-  // assertCanManageRound inside the lease, where it must still beat the
+  // assertCanManageRound (inside the lease on the plain "round" strategy, on the
+  // unleased pre-read on the others), where it must still beat the
   // saturated mutationRateLimit that follows it. Each round is seeded in a
   // status its transition legally accepts, so the 403 is shown to beat a request
   // that would otherwise have succeeded, not one already doomed to 409.
@@ -139,6 +140,7 @@ export const SCOPED_CASES: readonly CallSiteCase[] = [
   { file: "roundTransitions.ts", handler: "briefCompleteRound", endpoint: "briefCompleteRound", tier: "standard", forbiddenKind: "coord-scope", setup: async () => ({ forbidden: await crossClubCoord(), request: { method: "POST", params: { id: (await roundForOtherClub("Confirmed")).id } } }) },
   { file: "roundTransitions.ts", handler: "unlockRound", endpoint: "unlockRound", tier: "standard", forbiddenKind: "coord-scope", setup: async () => ({ forbidden: await crossClubCoord(), request: { method: "POST", params: { id: (await roundForOtherClub("Locked")).id } } }) },
   { file: "roundTransitions.ts", handler: "lockRound", endpoint: "lockRound", tier: "heavy", forbiddenKind: "coord-scope", setup: async () => ({ forbidden: await crossClubCoord(), request: { method: "POST", params: { id: (await roundForOtherClub("BriefComplete")).id } } }) },
+  { file: "roundTransitions.ts", handler: "completeRound", endpoint: "completeRound", tier: "heavy", forbiddenKind: "coord-scope", setup: async () => ({ forbidden: await crossClubCoord(), request: { method: "POST", params: { id: (await roundForOtherClub("Locked")).id } } }) },
   { file: "sites.ts", handler: "createSite", endpoint: "createSite", tier: "standard", forbiddenKind: "coord-scope", setup: async () => ({ forbidden: await crossClubCoord(), request: { method: "POST", body: { name: "Other Site", clubId: randomUUID() } } }) },
   { file: "sites.ts", handler: "updateSite", endpoint: "updateSite", tier: "standard", forbiddenKind: "coord-scope", setup: async () => ({ forbidden: await crossClubCoord(), request: { method: "PUT", params: { id: (await makeSite({ clubId: randomUUID() })).id }, body: { parkingW3W: "///nope.nope.nope" } } }) },
   { file: "sites.ts", handler: "deleteSite", endpoint: "deleteSite", tier: "standard", forbiddenKind: "coord-scope", setup: async () => ({ forbidden: await crossClubCoord(), request: { method: "DELETE", params: { id: (await makeSite({ clubId: randomUUID() })).id } } }) },
