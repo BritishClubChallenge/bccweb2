@@ -831,7 +831,8 @@ async function readLockLedger(roundId: string): Promise<SignatureLedgerView> {
 /**
  * Every Filled slot must hold a signature at the current brief version
  * before the round may lock, checked against the leased round `round` and the
- * frozen brief `frozenBrief` rather than the candidate.
+ * supplied resolution, which was resolved against the frozen brief rather
+ * than the candidate.
  *
  * The signing handlers take NO lease — signatures.ts appends to the ledger
  * directly — so a signature can land between this listing and the commit.

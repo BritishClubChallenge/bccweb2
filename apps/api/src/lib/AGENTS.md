@@ -412,7 +412,7 @@ don't re-read the source.
   order: higher `briefVersion` wins, then later `signedAt` (null lowest), then higher `id`.
   Four consumers route through it so the flags and gates cannot drift: the lock gate
   (`unsignedSlots` + `applyTo`), brief-complete including `dryRun` (`demoteSuperseded`), the
-  reflect job (`applyTo`) and self-unregistration (`isSigned`/`hasSignedAnyVersion`). Two
+  reflect job (`applyTo`) and self-unregistration (`hasSignedAnyVersion` only). Two
   loaders: `readRoundSignatureLedger(roundId)` (round-wide) and
   `readOccupancySignatureLedger(...)` (occupancy-scoped). Neither lists blobs itself.
 - `reflect.ts` — `reflectRoundSignToFly(roundId)` leases the round, reads the ledger inside the
@@ -421,7 +421,7 @@ don't re-read the source.
   leaves `BriefComplete` and throws `409 SIGNATURES_INCOMPLETE` on any unsigned Filled slot.
 - `auditLog.ts` — `appendAuditLine(category,payload)` append-only NDJSON (`audit/<cat>-YYYY-MM-DD.jsonl`).
 
-### Accepted deviations from pre-#279 behaviour (S1-S3)
+### Accepted deviations from pre-#279 behaviour (S1-S4)
 
 - **S1** — `invalidatedSignatureCount` is counted per slot. Before, a round with two slots
   sharing `(team.id, placeInTeam)` could over-count through the `slotKey` map. That shape is
@@ -430,5 +430,12 @@ don't re-read the source.
 - **S2** — self-unregistration judges the signature version from the signature payload (the
   same as the lock gate) instead of the blob path. Path and payload agree for every writer.
 - **S3** — self-unregistration now reads (and ignores) legacy `-vlegacy.json` blobs under the
-  pilot's own occupancy prefix. A malformed legacy blob there surfaces as
-  `500 DATA_SHAPE_INVALID`, as it already does for lock and reflect.
+  pilot's own occupancy prefix; more broadly, ANY blob under that prefix is now listed and
+  schema-validated, including non-canonical names the old path regex never matched and so
+  silently skipped. A malformed blob there surfaces as `500 DATA_SHAPE_INVALID`, as it
+  already does for lock and reflect.
+- **S4** — self-unregistration keys the occupancy ledger from the signature PAYLOAD
+  `teamId/place/pilotId`, not the blob path. A blob stored under the occupancy prefix whose
+  payload names a different team or place no longer blocks unregistration (the old lookup
+  trusted the path for team/place and only required `payload.pilotId` to match). No writer
+  produces such a blob: writers derive the path from the payload.

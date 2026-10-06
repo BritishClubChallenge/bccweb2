@@ -116,7 +116,7 @@ describe("signatureLedgerView / SignToFlyResolution (pure rules)", () => {
     }
   });
 
-  it("equal version and equal signedAt break by id, giving identical results under every permutation", () => {
+  it("equal version and equal signedAt resolve to the same observable outcome under every permutation (the id tiebreak itself is not publicly observable)", () => {
     const occupancy: Occupancy = { teamId: "team-1", place: 1, pilotId: "pilot-1" };
     // Identical signedAt; the id step is not observable through the public API
     // (predicates read only the version), so order-independence is the assertion.
@@ -512,6 +512,25 @@ describe("loaders", () => {
     );
 
     const view = await readOccupancySignatureLedger(roundId, occupancy);
+    expect(view.hasSignedAnyVersion(occupancy)).toBe(false);
+    expect(view.resolveAgainst(makeBrief({ version: 1 })).isSigned(occupancy)).toBe(false);
+  });
+
+  it("readOccupancySignatureLedger is false when a blob at this pilot's path carries a payload naming a different team and place (S4: the ledger keys from the payload, not the path)", async () => {
+    const roundId = randomUUID();
+    const occupancy: Occupancy = { teamId: "team-1", place: 1, pilotId: "pilot-1" };
+    // The blob sits at pilot-1's team-1/place-1 path, but the PAYLOAD names the
+    // same pilot under team-2/place-3. `signatureLedgerView` keys purely from
+    // payload `teamId:place:pilotId` (the old `getLatestSignature` trusted the
+    // path for team/place), so this pilot's occupancy stays unsigned. No writer
+    // produces such a blob — writers derive the path from the payload.
+    await writeSignatureToPath(
+      makeSignature({ roundId, teamId: "team-2", place: 3, pilotId: occupancy.pilotId, briefVersion: 1 }),
+      signaturePath(roundId, occupancy.teamId, occupancy.place, occupancy.pilotId, 1),
+    );
+
+    const view = await readOccupancySignatureLedger(roundId, occupancy);
+    expect(view.hasSignedAnyVersion({ teamId: "team-2", place: 3, pilotId: occupancy.pilotId })).toBe(true);
     expect(view.hasSignedAnyVersion(occupancy)).toBe(false);
     expect(view.resolveAgainst(makeBrief({ version: 1 })).isSigned(occupancy)).toBe(false);
   });
