@@ -1,12 +1,11 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
 import { BriefSchema, RoundSchema } from "@bccweb/schemas";
-import type { Round, RoundBrief, Signature } from "@bccweb/types";
+import type { RoundBrief } from "@bccweb/types";
 
 import { getPrivateBlobClient, withPrivateLeaseRetry } from "../blob.js";
 import { readJson, writePrivateJson } from "../blobJson.js";
-import { listSignaturesForRound } from "./ledger.js";
-import { currentBriefVersion, isSignedAtVersion, latestSignedVersions } from "./slotSignatureVersions.js";
+import { readRoundSignatureLedger } from "./resolution.js";
 
 type RoundBriefWithVersion = RoundBrief & { version?: number };
 
@@ -24,33 +23,10 @@ export async function reflectRoundSignToFly(roundId: string): Promise<void> {
     // signature snapshot after a newer reflect already materialized the round
     // (cross-instance last-writer-wins would otherwise regress signToFly
     // true -> false). The round lease serialises the snapshot with the write.
-    const signatures = await listSignaturesForRound(roundId);
-
-    const changed = materializeSignToFly(round, brief, signatures);
+    const ledger = await readRoundSignatureLedger(roundId);
+    const changed = ledger.resolveAgainst(brief).applyTo(round);
     if (changed) await writePrivateJson(roundPath, RoundSchema, round, leaseId);
   });
-}
-
-export function materializeSignToFly(
-  round: Round,
-  brief: RoundBrief & { version?: number },
-  signatures: Signature[],
-): boolean {
-  const version = currentBriefVersion(brief);
-  const latest = latestSignedVersions(signatures);
-
-  let changed = false;
-  for (const team of round.teams) {
-    for (const slot of team.pilots) {
-      const next = isSignedAtVersion(latest, team.id, slot.placeInTeam, version, slot.pilotId);
-      if (slot.signToFly !== next) {
-        slot.signToFly = next;
-        changed = true;
-      }
-    }
-  }
-
-  return changed;
 }
 
 async function readBriefOrNull(roundId: string): Promise<RoundBriefWithVersion | null> {
