@@ -38,7 +38,6 @@ import type {
   RoundBrief,
   BriefTeamEntry,
   BriefVersion,
-  Signature,
 } from "@bccweb/types";
 import { normalizeStatus, isRosterFrozen, rosterFrozenReason } from "@bccweb/types";
 import {
@@ -68,13 +67,9 @@ import {
   setPureTrackStatus,
 } from "../lib/puretrackStatus.js";
 import { getTelemetryClient } from "../lib/telemetry.js";
-import { listSignaturesForRound } from "../lib/signTofly/ledger.js";
-import { findUnsignedSlots } from "../lib/signTofly/completeness.js";
 import { findUnaccountedSlots, formatSlotRefs } from "../lib/roundGates.js";
-import { materializeSignToFly } from "../lib/signTofly/reflect.js";
-import { slotKey } from "../lib/signTofly/slotSignatureVersions.js";
-import { invalidatePriorSignToFlyFlags } from "../lib/signTofly/invalidate.js";
 import { computeBriefHash, MATERIAL_BRIEF_FIELDS } from "../lib/signTofly/briefVersion.js";
+import { readRoundSignatureLedger, type SignToFlyResolution, type SignatureLedgerView } from "../lib/signTofly/resolution.js";
 
 /** The three coordinator-authored times that now live on the brief, not the Round. */
 export interface BriefTimes {
@@ -463,14 +458,15 @@ function assertRosterComplete(round: Round, briefTeams: BriefTeamEntry[]): void 
 /**
  * Shared count core for brief-complete so the real transaction and its dryRun
  * preview derive `invalidatedSignatureCount` identically. MUTATES `brief`
- * (freeze/version bump) and `round` (sign-to-fly invalidation) but performs NO
+ * (freeze/version bump) and `round` (sign-to-fly demotion) but performs NO
  * persistence: the real path persists afterwards; the dryRun path MUST pass
- * CLONES so nothing is written.
+ * CLONES so nothing is written. The ledger is resolved AFTER the version
+ * bump, so superseded flags are judged against the NEW brief version.
  */
 function freezeBriefAndCountInvalidations(
   round: Round,
   brief: RoundBrief,
-  signatures: Signature[],
+  ledger: SignatureLedgerView,
   briefTeams: BriefTeamEntry[],
   callerUserId: string,
 ): number {
@@ -499,25 +495,7 @@ function freezeBriefAndCountInvalidations(
     brief.hash = newHash;
   }
 
-  const signedBefore = new Map<string, boolean>();
-  for (const team of round.teams) {
-    for (const slot of team.pilots) {
-      signedBefore.set(slotKey(team.id, slot.placeInTeam), slot.signToFly);
-    }
-  }
-  invalidatePriorSignToFlyFlags(round, brief, signatures);
-  let invalidatedSignatureCount = 0;
-  for (const team of round.teams) {
-    for (const slot of team.pilots) {
-      if (
-        signedBefore.get(slotKey(team.id, slot.placeInTeam)) === true &&
-        slot.signToFly === false
-      ) {
-        invalidatedSignatureCount += 1;
-      }
-    }
-  }
-  return invalidatedSignatureCount;
+  return ledger.resolveAgainst(brief).demoteSuperseded(round);
 }
 
 /** Slots currently signed (signToFly === true) — the reopen dryRun's at-risk count. */
@@ -563,11 +541,11 @@ function briefCompleteRound(
     preview: async (c) => {
       const briefTeams = await buildBriefTeams(c.round);
       assertRosterComplete(c.round, briefTeams);
-      const signatures = await listSignaturesForRound(c.id);
+      const ledger = await readRoundSignatureLedger(c.id);
       const invalidatedSignatureCount = freezeBriefAndCountInvalidations(
         structuredClone(c.round),
         structuredClone(preBrief),
-        signatures,
+        ledger,
         briefTeams,
         c.caller.userId,
       );
@@ -576,11 +554,11 @@ function briefCompleteRound(
     mutate: async (c) => {
       const briefTeams = await buildBriefTeams(c.round);
       assertRosterComplete(c.round, briefTeams);
-      const signatures = await listSignaturesForRound(c.id);
+      const ledger = await readRoundSignatureLedger(c.id);
       return freezeBriefAndCountInvalidations(
         c.round,
         c.brief!,
-        signatures,
+        ledger,
         briefTeams,
         c.caller.userId,
       );
@@ -832,9 +810,9 @@ function assertFrozenBriefIntact(roundId: string, brief: RoundBrief): void {
   }
 }
 
-async function listLockSignatures(roundId: string): Promise<Signature[]> {
+async function readLockLedger(roundId: string): Promise<SignatureLedgerView> {
   try {
-    return await listSignaturesForRound(roundId);
+    return await readRoundSignatureLedger(roundId);
   } catch {
     // The lock row's persistFailure turns anything that is not an HttpError
     // into BRIEF_PERSIST_FAILED and tells the operator to reopen and re-complete.
@@ -864,8 +842,8 @@ async function listLockSignatures(roundId: string): Promise<Signature[]> {
  * exclude concurrent reopen (reopen takes the round lease) and brief edits,
  * which is what the hash gate (`assertFrozenBriefIntact`) depends on.
  */
-function assertEverySlotSigned(round: Round, frozenBrief: RoundBrief, signatures: Signature[]): void {
-  const unsigned = findUnsignedSlots(round, frozenBrief, signatures);
+function assertEverySlotSigned(round: Round, resolution: SignToFlyResolution): void {
+  const unsigned = resolution.unsignedSlots(round);
   if (unsigned.length > 0) {
     throw new HttpError(
       409,
@@ -992,8 +970,8 @@ function lockRound(req: HttpRequest, ctx: InvocationContext): Promise<HttpRespon
       const frozen = brief!;
       const merged = await mergeBriefForLock(candidate, frozen);
       assertFrozenBriefIntact(id, merged);
-      const signatures = await listLockSignatures(id);
-      assertEverySlotSigned(round, frozen, signatures);
+      const resolution = (await readLockLedger(id)).resolveAgainst(frozen);
+      assertEverySlotSigned(round, resolution);
       // Write the ledger result onto the slots before the round leaves
       // BriefComplete. `slot.signToFly` is materialized asynchronously off the
       // signtofly-reflect queue, so it can still be false here even though every
@@ -1001,7 +979,7 @@ function lockRound(req: HttpRequest, ctx: InvocationContext): Promise<HttpRespon
       // non-BriefComplete rounds, so a reflect job that lands after this write
       // would be a no-op and the stale false would become permanent. The gate
       // above has already proven the ledger under this same lease, so reuse it.
-      materializeSignToFly(round, frozen, signatures);
+      resolution.applyTo(round);
       applyLockToRound(round, {
         roundId: id,
         snapshotMap: snapshots,
