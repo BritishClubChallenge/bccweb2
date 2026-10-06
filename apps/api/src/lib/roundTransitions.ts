@@ -554,9 +554,9 @@ async function runRoundWrite<Extra>(
  * R8 write order (replaces `completeBriefTransaction`, roundsMutate.ts): the
  * BRIEF is written BEFORE the round so a crashed second write never leaves a
  * BriefComplete round pointing at an unfrozen brief. Setting `round.status =
- * spec.to` AFTER `mutate` is safe because `invalidatePriorSignToFlyFlags`
- * (lib/signTofly/invalidate.ts) never reads `round.status` — it keys purely on
- * the brief version and slot fields.
+ * spec.to` AFTER `mutate` is safe because `SignToFlyResolution.demoteSuperseded`
+ * (lib/signTofly/resolution.ts) likewise never reads `round.status` — it keys
+ * purely on the brief version and slot fields.
  *
  * The `mutate` hook receives a context whose `brief` field is the FRESH leased
  * brief read (a different object from the handler's pre-read — state may have
