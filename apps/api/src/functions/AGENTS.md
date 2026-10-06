@@ -49,7 +49,7 @@ gotchas, and root [AGENTS.md](../../../../AGENTS.md) for the overall architectur
 | `teams.ts` | team + pilot slot management; `addPilot` hard-blocks wrong/absent season club (`422 TEAM_CLUB_MISMATCH` / `422 NO_CLUB_FOR_SEASON`) — no Admin override; see `docs/runbooks/round-club-pilot-decision.md` |
 | `authFunctions.ts` (~629) | register/verify/resend/login/refresh/forgot/reset + "silent OK" anti-enumeration responses |
 | `admin.ts` | config/user admin; `runConfigRmw(...)` + lease-conflict translation |
-| `brief.ts` | invalidates sign-to-fly on material brief change, regenerates PDF outside lease |
+| `brief.ts` | brief edits (Proposed/Confirmed only); does NOT touch sign-to-fly (brief-complete invalidates stale signatures); regenerates PDF outside lease |
 | `meProfile.ts` | self-service create/link (pilot ↔ user index) |
 
 ## New file checklist
