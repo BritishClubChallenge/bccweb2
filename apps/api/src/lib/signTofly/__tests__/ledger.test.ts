@@ -13,6 +13,7 @@ import {
 import {
   getLatestSignature,
   legacySignaturePath,
+  listSignaturesForOccupancy,
   listSignaturesForRound,
   overrideSignaturePath,
   readSignature,
@@ -101,6 +102,58 @@ describe("signature ledger", () => {
 
     expect(listed).toEqual(expect.arrayContaining(sigs));
     expect(listed).toHaveLength(2);
+  });
+
+  describe("listSignaturesForOccupancy", () => {
+    it("returns this pilot's versioned, override and legacy blobs for the slot", async () => {
+      const roundId = randomUUID();
+      const teamId = randomUUID();
+      const place = 3;
+      const pilotId = randomUUID();
+      const versioned = makeSignature({ roundId, teamId, place, pilotId, briefVersion: 2 });
+      const override = makeSignature({ roundId, teamId, place, pilotId, briefVersion: 2 });
+      const legacy = makeSignature({ roundId, teamId, place, pilotId, briefVersion: null });
+      await writeSignature(versioned);
+      await writeSignatureToPath(
+        override,
+        overrideSignaturePath(roundId, teamId, place, pilotId, 2, "abcd1234"),
+      );
+      await writeSignatureToPath(legacy, legacySignaturePath(roundId, teamId, place, pilotId));
+
+      const listed = await listSignaturesForOccupancy(roundId, teamId, place, pilotId);
+
+      expect(listed).toEqual(expect.arrayContaining([versioned, override, legacy]));
+      expect(listed).toHaveLength(3);
+    });
+
+    it("excludes another pilot's blobs under the same team+place", async () => {
+      const roundId = randomUUID();
+      const teamId = randomUUID();
+      const place = 2;
+      const pilotId = randomUUID();
+      const otherPilotId = randomUUID();
+      const own = makeSignature({ roundId, teamId, place, pilotId, briefVersion: 1 });
+      await writeSignature(own);
+      await writeSignature(makeSignature({ roundId, teamId, place, pilotId: otherPilotId, briefVersion: 1 }));
+      await writeSignature(makeSignature({ roundId, teamId, place, pilotId: otherPilotId, briefVersion: 2 }));
+
+      const listed = await listSignaturesForOccupancy(roundId, teamId, place, pilotId);
+
+      expect(listed).toEqual([own]);
+    });
+
+    it("excludes a different place (place 1 must not match place 10)", async () => {
+      const roundId = randomUUID();
+      const teamId = randomUUID();
+      const pilotId = randomUUID();
+      const own = makeSignature({ roundId, teamId, place: 1, pilotId, briefVersion: 1 });
+      await writeSignature(own);
+      await writeSignature(makeSignature({ roundId, teamId, place: 10, pilotId, briefVersion: 1 }));
+
+      const listed = await listSignaturesForOccupancy(roundId, teamId, 1, pilotId);
+
+      expect(listed).toEqual([own]);
+    });
   });
 
   it("path builders emit guard-safe paths for legitimate inputs", () => {

@@ -87,6 +87,28 @@ export async function listSignaturesForRound(roundId: string): Promise<Signature
   return signatures;
 }
 
+export async function listSignaturesForOccupancy(
+  roundId: string,
+  teamId: string,
+  place: number,
+  pilotId: string,
+): Promise<Signature[]> {
+  const prefix = `${latestSignaturePathPattern(roundId, teamId, place)}${pilotId}-`;
+  const signatures: Signature[] = [];
+
+  for await (const item of getPrivateContainer().listBlobsFlat({ prefix })) {
+    signatures.push(
+      await readJson(
+        getPrivateBlobClient(item.name),
+        SignatureLedgerSchema,
+        item.name,
+      ),
+    );
+  }
+
+  return signatures;
+}
+
 // Returns the newest signature made by THIS pilot for this team+place, or
 // null. The lookup is scoped by pilotId (#263): after a roster swap, a
 // former occupant's leftover signature blob must never block a different
