@@ -36,7 +36,7 @@ Five queue-trigger modules (see the architecture doc for the flows they drive):
 
 Lib helpers live in [`src/lib/AGENTS.md`](src/lib/AGENTS.md): `blob`, `blobJson`, `auth` +
 `authHelpers`, `roundAuth`, `accountMutation`, `email`, `http`, `clientIp`, `pdf`,
-`rateLimit`, `recompute`, `roundGates`, `roundTransitions`, `puretrack`, `teamCaptain`,
+`rateLimit`, `recompute`, `roundGates`, `roundRecord`, `roundTransitions`, `puretrack`, `teamCaptain`,
 `briefPdf`, `queue`, `telemetry` + `telemetryRedactor`, `signTofly/*`.
 
 ## Auth

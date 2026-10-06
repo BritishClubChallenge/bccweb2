@@ -55,6 +55,8 @@ don't re-read the source.
   30s leases that retry on 409/412 contention so concurrent cross-blob edits serialize. The
   brief blob must already exist — create-or-skip it (`writePrivateBlob(..., {ifNoneMatch:"*"})`)
   first. Route every brief edit / brief-complete / signature cross-blob RMW through this.
+  The round-write executor (`roundTransitions.ts`) reaches these primitives only through
+  `roundRecord.ts`, never directly.
 - `resetBlobSingletons()` / `resetQueueSingletons()` — **test-only**; clear their local
   caches and the shared `storageClients.ts` caches so environment is re-read.
 - Gotcha: release failure is telemetry-only; the fn's result/error wins.
@@ -131,6 +133,62 @@ don't re-read the source.
   read identically. `findUnsignedSlots` stays in `signTofly/completeness.ts` (it
   needs the brief + ledger); only the round-only scan and the formatter live here.
 
+## roundRecord.ts — the round record store
+
+- Purpose: the expand step of #282. The record is the single owner of the round and brief
+  blob paths (`rounds/{id}.json`, `round-briefs/{id}.json`), of which blob lease primitive
+  each operation takes, of the lock brief rollback and its telemetry, and of per-operation
+  missing-round semantics. The round-write executor (`roundTransitions.ts`) is its first
+  and only consumer. Every other caller keeps using the old primitives (`withPrivateLease`,
+  `withRoundAndBriefLease`, `readJson`, ...) directly until #283 migrates them.
+- The six operations:
+  - `readRound(id): Promise<Round>`
+  - `mutateRound(id, step: (round) => Promise<T>): Promise<RoundMutation<T>>`
+  - `mutateRoundRenewing(id, step: (round) => Promise<T>): Promise<RoundMutation<T>>`
+  - `mutateRoundWithBrief(id, steps: RoundAndBriefSteps<T>): Promise<RoundMutation<T>>`
+  - `mutateRoundWithBriefOrRestore(id, operation: string, steps: RoundAndBriefSteps<T>): Promise<RoundMutation<T>>`
+  - `mutateRoundWithPureTrackEchoes(id, step: ({ round, brief }) => Promise<T>): Promise<RoundMutation<T>>`
+
+  | op | lease primitive | missing round | non-404 error |
+  | --- | --- | --- | --- |
+  | `readRound` | none | 404 `NOT_FOUND` `HttpError` | propagated unchanged |
+  | `mutateRound` | plain private lease (`withPrivateLease`) | 404 `NOT_FOUND` `HttpError` | propagated unchanged |
+  | `mutateRoundRenewing` | renewing private lease (`withPrivateLeaseRenewing`) | 404 `NOT_FOUND` `HttpError` | propagated unchanged |
+  | `mutateRoundWithBrief` | round+brief lease (`withRoundAndBriefLease`) | 404 `NOT_FOUND` `HttpError` | propagated unchanged |
+  | `mutateRoundWithBriefOrRestore` | round+brief lease + brief restore | propagated unchanged (lock maps it) | propagated unchanged |
+  | `mutateRoundWithPureTrackEchoes` | via `mutatePureTrackEchoes` | propagated unchanged | propagated unchanged |
+
+  The 404 mapping is duck-typed on the thrown object's own status code (a storage 404 from
+  lease acquisition or the read, or a 404-status error thrown from the step). The two
+  non-translating operations exist for byte-compatibility with lock's persist-failure answer
+  and unlock's generic-catch answer; #283/#286 must preserve that.
+- Every mutation returns `{ round, result }` (`RoundMutation<T>`): `round` is the same object
+  instance the step received and the record wrote, `result` is the step's return value.
+  The PureTrack-echoes operation answers a defensive `500 INTERNAL` if the delegated
+  primitive returns without committing.
+- The cross-blob operations take a two-stage `RoundAndBriefSteps<T>`: `beforeBrief(round)`
+  runs on the leased round BEFORE the brief is read (the executor's status re-check), then
+  `mutate({ round, brief })` changes both documents in memory. The record then writes the
+  BRIEF before the round, so a crash never leaves the round pointing at an unfrozen brief.
+- `mutateRoundWithBriefOrRestore` captures the brief's raw bytes before the step. If the
+  round write fails after the brief write, it restores those bytes byte-exact under the
+  brief lease; a failed restore emits `puretrack.crossBlobReconcileRequired` with `roundId`,
+  `operation` (the caller's row key), `roundWriteError` and `rollbackError`, then the
+  original round-write error is rethrown.
+- Each operation reads the round exactly once and never adds an existence pre-check: a
+  missing blob surfaces from the lease acquisition or that one read.
+- Argument shapes existing spies rely on: `withRoundAndBriefLease` gets the bare round id;
+  `withPrivateLease` and `withPrivateLeaseRenewing` get the full `rounds/{id}.json` path, and
+  the renewing call never passes options; `readJson` gets the path as its 3rd argument.
+- `roundRecord.ts` must not import from `roundTransitions.ts` (or `../functions/`,
+  `./roundAuth.js`), including type-only imports; `operation` is typed `string`.
+- Pins in `functions/__tests__/roundWriteContract.test.ts`: n1 says `roundRecord.ts`
+  contains exactly one each of `"Round not found"`, `"puretrack.crossBlobReconcileRequired"`,
+  `withPrivateLeaseRenewing(`, `withPrivateLease(`, `mutatePureTrackEchoes(` and the
+  `rounds/` and `round-briefs/` path templates; n2 says it never contains the substring
+  naming the executor module. k4 (one reconcile event) and m4 (one renewing-lease call)
+  were re-homed from the executor onto `roundRecord.ts`.
+
 ## roundTransitions.ts — the round write table and executor
 
 - `ROUND_WRITES: Record<RoundWriteName, RoundWriteSpec>` is the SOURCE OF TRUTH for the
@@ -194,33 +252,39 @@ don't re-read the source.
 - Per-strategy order:
   - `round`: requireId → requireCoordCaller → either preview (unleased read →
     assertCanManageRound → scope → limiter → assertFrom (transitions) → gate → preview) or
-    `withPrivateLease{ read → assertCanManageRound → scope → limiter → assertFrom → gate →
-    mutate → status = to (transitions) → write }` → translate → afterCommit → republish →
-    afterResponse → respond. The
+    `mutateRound{ [record reads] → assertCanManageRound → scope → limiter → assertFrom →
+    gate → mutate → status = to (transitions) → [record writes] }` → translate →
+    afterCommit → republish → afterResponse → respond. The
     round is read and the caller resolved exactly once.
   - `roundAndBrief` (brief-complete): requireId → requireCoordCaller → unleased pre-read →
     assertCanManageRound → scope → limiter → assertFrom → gate → [preview returns here] →
-    `withRoundAndBriefLease{ read round → assertFrom again → read brief → mutate →
-    status = to → write BRIEF then round }` → translate → afterCommit → republish →
+    `mutateRoundWithBrief{ beforeBrief: assertFrom again; mutate: mutate → status = to }`
+    (the record reads the round, runs `beforeBrief`, reads the brief, runs `mutate`, then
+    writes BRIEF then round) → translate → afterCommit → republish →
     afterResponse → respond. Brief first
     so a crash never leaves a BriefComplete round over an unfrozen brief.
   - `pureTrackEchoes` (unlock): requireId → requireCoordCaller → unleased pre-read →
-    assertCanManageRound → scope → limiter → `mutatePureTrackEchoes(id, cb{ assertFrom →
-    gate → mutate → status = to })` → afterCommit → republish → afterResponse → respond. The call sits OUTSIDE
-    `translateStorageError`, so a plain storage failure reaches `withErrorHandler`'s generic
-    catch unchanged, as the pre-#277 handler did. An uncaptured round is a defensive 500.
+    assertCanManageRound → scope → limiter → `mutateRoundWithPureTrackEchoes(id, step{
+    assertFrom → gate → mutate → status = to })` (the record delegates to
+    `mutatePureTrackEchoes`) → afterCommit → republish → afterResponse → respond. The call
+    sits OUTSIDE `translateStorageError`, so a plain storage failure reaches
+    `withErrorHandler`'s generic catch unchanged, as the pre-#277 handler did. An
+    uncommitted mutation is a defensive 500 raised by the record.
   - `roundAndBriefRollback` (lock): requireId → requireCoordCaller → unleased pre-read →
-    assertCanManageRound → scope → limiter → assertFrom → gate → `withRoundAndBriefLease{
-    read round → assertFrom again → read brief → capture its raw bytes → mutate →
-    status = to → write BRIEF then round; if the round write fails, restore the raw brief
-    bytes under the brief lease (a failed restore emits
-    `puretrack.crossBlobReconcileRequired` with `operation` = the row key) and rethrow }` →
-    non-`HttpError` → `persistFailure` (NOT `translateStorageError`) → afterCommit →
-    republish → afterResponse → respond. No preview path. The callback may re-run when a
-    storage 409/412 escapes it (`withPrivateLeaseRetry`), so `mutate` must be re-entrant.
+    assertCanManageRound → scope → limiter → assertFrom → gate →
+    `mutateRoundWithBriefOrRestore(id, name, { beforeBrief: assertFrom again; mutate:
+    mutate → status = to })` (in `roundRecord.ts`: read round → `beforeBrief` → read brief →
+    capture its raw bytes → `mutate` → write BRIEF then round; if the round write fails,
+    restore the raw brief bytes under the brief lease, a failed restore emitting the
+    reconcile event with `operation` = the row key, and rethrow) → non-`HttpError` →
+    `persistFailure` (NOT `translateStorageError`; the record operation does not translate
+    a missing round either) → afterCommit → republish → afterResponse → respond. No preview
+    path. The record's lease primitive may re-run the step when a storage 409/412 escapes it,
+    so `mutate` must be re-entrant.
   - `roundRenewing` (complete): requireId → requireCoordCaller → unleased pre-read →
-    assertCanManageRound → scope → limiter → assertFrom → `withPrivateLeaseRenewing{
-    read round → assertFrom again → gate → mutate → status = to → write }` → translate →
+    assertCanManageRound → scope → limiter → assertFrom → `mutateRoundRenewing{
+    [record reads] → assertFrom again → gate → mutate → status = to → [record writes] }` →
+    translate →
     afterCommit → republish → afterResponse → respond. No preview path; the gate runs
     only inside the lease; acquisition does not retry (as the pre-#276 handler).
   - `create`: requireCoordCaller → scope → limiter → mutate → republish → after → 201. No
@@ -236,12 +300,14 @@ don't re-read the source.
   accounted-for gate and scoring see, so an edit that lands before acquisition is never
   stale-overwritten. Unlock's pre-read exists ONLY to feed
   `assertCanManageRound` before the limiter: `mutatePureTrackEchoes`
-  (`lib/puretrackStatus.ts`) owns the whole read/clone/lease/write/rollback cycle and does
+  (`lib/puretrackStatus.ts`, reached through the record's `mutateRoundWithPureTrackEchoes`)
+  owns the whole read/clone/lease/write/rollback cycle and does
   its own read, so the one `assertFrom` runs inside its callback. The asymmetry is
   deliberate, not an oversight; it also means a missing round 404s at the pre-read before
   `ensureBriefExists` could placeholder-create a brief for it.
 - Previews are unleased. Reopen's and brief-complete's `preview` runs on
-  `readRoundTranslated` (an unleased read with the same 404/500 translation), never inside
+  `readRoundTranslated(id)`, which wraps the record's `readRound` (an unleased read whose
+  missing round is the record's 404) in `translateStorageError`, never inside
   a lease. There's no lease-scoped try/catch around that branch, so scope errors are not
   wrapped or translated: an `HttpError` propagates as-is and anything else falls to
   `withErrorHandler`'s generic catch-all.
@@ -252,11 +318,17 @@ don't re-read the source.
   `withLeaseOnClient` releases in a `finally` (`blob.ts:319-331`) and the limiter is a
   synchronous in-memory token bucket with no I/O. `_evidence.issue8.test.ts`'s
   `coord-scope` cases enforce the 403-before-429 order.
+- `translateStorageError(err)` maps a failure the record did not answer itself: an
+  `HttpError` (including the record's own 404) passes through, an `UntranslatedHookError`
+  is unwrapped to its original cause, and anything else is `500 INTERNAL`. It does no 404
+  detection of its own; that lives in `roundRecord.ts`.
 - **Single-occurrence invariant**: `roundTransitions.ts` contains exactly one literal each
   of `mutationRateLimit(req, caller, spec.endpoint, spec.tier)`, `getCallerIdentity(`,
-  `updateRoundsIndex(`, `"Round not found"` and `"MISSING_ROUND_ID"`;
-  and exactly one `"puretrack.crossBlobReconcileRequired"` (the rollback runner);
-  exactly one `withPrivateLeaseRenewing(` (the renewing runner);
+  `updateRoundsIndex(` and `"MISSING_ROUND_ID"`, and contains none of the storage needles
+  (n3: blob paths, lease primitives, `readJson(`/`writePrivateJson(`, the reconcile event,
+  `"Round not found"`, the storage imports) and imports `./roundRecord.js` (n4). The
+  reconcile event and the renewing-lease call are pinned single in `roundRecord.ts` (k4,
+  m4; see the roundRecord section).
   `roundsMutate.ts` holds none of lock's lease or rollback code (`withRoundAndBriefLease(`,
   `downloadToBuffer` and `crossBlobReconcileRequired` are absent) and no round-write
   preamble token at all.
@@ -298,18 +370,22 @@ don't re-read the source.
     republish). Unreachable in practice: `recomputeSeason` is `async`, and its rejection
     keeps the `[completeRound] recomputeSeason(<year>) failed:` log line.
 - **#293 applies only to the `round` strategy.** There, rejected requests (403/429/409)
-  contend for the round lease and `withPrivateLease` does NOT retry, so a lost race escapes
+  contend for the round lease and the record's `mutateRound` takes `withPrivateLease`, which
+  does NOT retry, so a lost race escapes
   as a non-404 non-`HttpError` and `translateStorageError` maps it to `500 INTERNAL`.
-  `withRoundAndBriefLease` nests two `withPrivateLeaseRetry` calls, which retry 409/412
+  `mutateRoundWithBrief`/`mutateRoundWithBriefOrRestore` take `withRoundAndBriefLease`, which
+  nests two `withPrivateLeaseRetry` calls that retry 409/412
   with backoff (`blob.ts:286-304,464-473`), so brief-complete and lock don't pay this cost; unlock
   delegates its lease to `mutatePureTrackEchoes`. Making `round` acquisition retry without
   re-charging the limiter is [#293](https://github.com/BritishClubChallenge/bccweb2/issues/293).
-  Complete's `roundRenewing` lease does not retry acquisition either, exactly as the
+  Complete's `roundRenewing` lease (`mutateRoundRenewing`) does not retry acquisition either, exactly as the
   pre-#276 handler: a lost race is `500 INTERNAL`, but only real completes contend,
   because its 403/429/409-status rejections resolve on the unleased pre-read.
 - Adding a write: add a `RoundWriteName`, one `ROUND_WRITES` row and the handler's hooks,
   reusing the shared preamble, translation, limiter and republish. When no existing lease
-  strategy fits, add one lease value, one runner and one dispatch branch that reuse
+  strategy fits, add one record operation in `roundRecord.ts` (it owns the paths, the lease
+  primitive and any missing-round mapping) plus one runner, with one lease value and one
+  dispatch branch, reusing
   `requireId`, `requireCoordCaller`, `readRoundTranslated`, `chargeLimiter`, `assertFrom`
   and `republishAndRespond`, as `roundAndBriefRollback` (#275) and `roundRenewing` (#276)
   did; keep the counted literals single (`roundWriteContract.test.ts`).
