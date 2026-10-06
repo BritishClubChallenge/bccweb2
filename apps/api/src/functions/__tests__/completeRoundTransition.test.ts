@@ -15,7 +15,9 @@
  *     got <status>"` (today the handler returns a bespoke non-HttpError body).
  *   - b2 (C2): the in-lease race re-check carries the same detail wording.
  *   - h2 (C4): a synchronous throw in post-response work is contained and
- *     logged via ctx.error (today it escapes as an unhandled rejection).
+ *     logged via console.error, so the 200 stands (today it escapes the
+ *     `.catch` and withErrorHandler answers a generic 500 after the commit
+ *     and the republish).
  *
  * The mocks are pass-through wrappers (`...actual`) around the real modules so
  * every case exercises the REAL storage/lease code against Azurite.
