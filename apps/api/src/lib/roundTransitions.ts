@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
 /**
- * The round write TABLE and its EXECUTOR (issues #274 / #277 / #275 / #276).
+ * The round write TABLE and its EXECUTOR (issues #274 / #277 / #275 / #276 /
+ * #282).
  *
  * `ROUND_WRITES` is the state machine for every round write: each row
  * declares the transition's `from`/`to`, the `lease` strategy, and the
@@ -16,13 +17,20 @@
  * writes are now routed, including lock (#275) on the `roundAndBriefRollback`
  * strategy and complete (#276) on the `roundRenewing` strategy.
  *
+ * Every storage concern — the round and brief blob paths, which lease
+ * primitive each strategy takes, the brief rollback and its telemetry, and
+ * the missing-round 404 mapping — lives in the round record,
+ * `roundRecord.ts` (#282). Each strategy's leased block is one record
+ * operation whose step is the hook chain below; this module never touches a
+ * blob path or lease primitive itself.
+ *
  * Ordering: the read/limiter pattern is PER-STRATEGY, not executor-wide. Only
- * the plain `round` strategy reads `rounds/{id}.json` once, inside its lease,
- * and runs `mutationRateLimit` there too. `roundAndBrief`,
- * `roundAndBriefRollback`, `roundRenewing` and `pureTrackEchoes` pre-read
- * unleased (charging the limiter in the preamble) and read again under their
- * leases; `create` reads no existing round and takes no lease. See the comment
- * at `chargeLimiter` before moving it.
+ * the plain `round` strategy reads the round once, inside its lease (the
+ * record's mutateRound), and runs `mutationRateLimit` there too.
+ * `roundAndBrief`, `roundAndBriefRollback`, `roundRenewing` and
+ * `pureTrackEchoes` pre-read unleased (charging the limiter in the preamble)
+ * and read again under their leases; `create` reads no existing round and
+ * takes no lease. See the comment at `chargeLimiter` before moving it.
  */
 
 import type {
@@ -31,16 +39,12 @@ import type {
   InvocationContext,
 } from "@azure/functions";
 import type { CallerIdentity, Round, RoundBrief, RoundStatus } from "@bccweb/types";
-import { BriefSchema, RoundSchema } from "@bccweb/schemas";
 import { getCallerIdentity } from "./auth.js";
-import { getPrivateBlobClient, getPrivateBlockBlobClient, withPrivateLease, withPrivateLeaseRenewing, withRoundAndBriefLease } from "./blob.js";
-import { readJson, writePrivateJson } from "./blobJson.js";
 import { HttpError } from "./http.js";
 import { mutationRateLimit, type MutationRateLimitTier } from "./rateLimit.js";
-import { mutatePureTrackEchoes } from "./puretrackStatus.js";
 import { updateRoundsIndex } from "./recompute.js";
 import { assertCanManageRound, isCoord } from "./roundAuth.js";
-import { getTelemetryClient } from "./telemetry.js";
+import { mutateRound, mutateRoundRenewing, mutateRoundWithBrief, mutateRoundWithBriefOrRestore, mutateRoundWithPureTrackEchoes, readRound } from "./roundRecord.js";
 
 export type RoundTransitionName = "confirm" | "reopen" | "cancel" | "uncancel";
 
@@ -330,19 +334,21 @@ async function requireCoordCaller(req: HttpRequest): Promise<CallerIdentity> {
   return caller;
 }
 
-/** Map a lease-scoped failure to the response error: 404, else generic 500. */
+/**
+ * Map a failure the record did not answer itself: an HttpError (including
+ * the record's own 404) passes through, a wrapped scope-hook error is
+ * unwrapped to its original, and anything else is the generic 500.
+ */
 function translateStorageError(err: unknown): never {
   if (err instanceof HttpError) throw err;
   if (err instanceof UntranslatedHookError) throw err.cause;
-  const e = err as { statusCode?: number };
-  if (e.statusCode === 404) throw new HttpError(404, "NOT_FOUND", "Round not found");
   throw new HttpError(500, "INTERNAL");
 }
 
-/** Unleased read for the preview path, translated the same way a leased read is. */
-async function readRoundTranslated(path: string): Promise<Round> {
+/** Unleased read for the pre-reads and previews, translated the same way a leased read is. */
+async function readRoundTranslated(id: string): Promise<Round> {
   try {
-    return await readJson(getPrivateBlobClient(path), RoundSchema, path);
+    return await readRound(id);
   } catch (err: unknown) {
     translateStorageError(err);
   }
@@ -465,12 +471,14 @@ async function republishAndRespond<Extra>(
  *   try/catch, so an `HttpError` already propagates as-is and anything else
  *   falls to withErrorHandler's generic catch-all — wrapping would change
  *   nothing.
- * - Otherwise: withPrivateLease{ readJson -> assertCanManageRound -> scope
+ * - Otherwise: mutateRound{ assertCanManageRound -> scope
  *   (untranslated) -> chargeLimiter -> [transition only: assertFrom] -> gate
- *   -> mutate -> [transition only: `round.status = spec.to`] ->
- *   writePrivateJson(round) } -> translateStorageError -> republish ->
- *   respond (200). The caller is resolved and the round read each exactly
- *   once.
+ *   -> mutate -> [transition only: `round.status = spec.to`] } ->
+ *   translateStorageError -> republish -> respond (200). The caller is
+ *   resolved and the round read each exactly once: the record's leased read
+ *   is the only read of the round in this request, its lease acquisition
+ *   already threw for a missing blob, and the catch below maps the record's
+ *   answer.
  */
 async function runRoundWrite<Extra>(
   req: HttpRequest,
@@ -481,10 +489,8 @@ async function runRoundWrite<Extra>(
   const id = requireId(req);
   const caller = await requireCoordCaller(req);
 
-  const path = `rounds/${id}.json`;
-
   if (req.query.get("dryRun") === "true" && hooks?.preview) {
-    const round = await readRoundTranslated(path);
+    const round = await readRoundTranslated(id);
     assertCanManageRound(caller, round);
     const c: RoundWriteContext = { req, ctx, caller, id, round };
     if (hooks.scope) await hooks.scope(c);
@@ -498,12 +504,7 @@ async function runRoundWrite<Extra>(
   let written: Round;
 
   try {
-    const leased = await withPrivateLease(path, async (leaseId) => {
-      // The ONLY read of the round in this request. A 404 here is impossible:
-      // acquireLease (blob.ts:306-313) already ran and threw for a missing
-      // blob, and the catch below maps it.
-      const round = await readJson(getPrivateBlobClient(path), RoundSchema, path);
-
+    const leased = await mutateRound(id, async (round) => {
       // Fine-grained scope, 403 — step 3 of rateLimit.ts:138-164.
       assertCanManageRound(caller, round);
 
@@ -523,11 +524,10 @@ async function runRoundWrite<Extra>(
         ? await hooks.mutate(c)
         : (undefined as Extra);
       if (spec.kind === "transition") round.status = spec.to;
-      await writePrivateJson(path, RoundSchema, round, leaseId);
-      return { round, produced };
+      return produced;
     });
     written = leased.round;
-    extra = leased.produced;
+    extra = leased.result;
   } catch (err: unknown) {
     translateStorageError(err);
   }
@@ -539,10 +539,10 @@ async function runRoundWrite<Extra>(
  * The `roundAndBrief` lease strategy (brief-complete): requireId ->
  * requireCoordCaller -> readRoundTranslated -> assertCanManageRound -> scope ->
  * chargeLimiter -> assertFrom -> gate -> [preview returns here] ->
- * withRoundAndBriefLease{ readJson(round) -> assertFrom -> readJson(brief,
- * BriefSchema) -> mutate({round, brief}) -> `round.status = spec.to` ->
- * writePrivateJson(brief, briefLeaseId) -> writePrivateJson(round,
- * roundLeaseId) } -> translateStorageError -> republish -> respond (200).
+ * mutateRoundWithBrief{ beforeBrief: assertFrom -> mutate({round, brief}) ->
+ * `round.status = spec.to` } (the record reads the round, runs beforeBrief,
+ * reads the brief, then writes the brief BEFORE the round) ->
+ * translateStorageError -> republish -> respond (200).
  *
  * The unleased pre-read is what the preview and the real path share; the real
  * path then re-reads the round INSIDE the lease and re-runs `assertFrom` —
@@ -572,13 +572,11 @@ async function runRoundAndBriefWrite<Extra>(
   const id = requireId(req);
   const caller = await requireCoordCaller(req);
 
-  const path = `rounds/${id}.json`;
-
   // The shared unleased preamble: pre-read, fine scope, limiter, status gate,
   // then the write's own gate (brief-complete: the brief must already exist).
   // No try/catch here — readRoundTranslated self-contains its translation and
   // hook HttpErrors propagate straight to withErrorHandler.
-  const preRound = await readRoundTranslated(path);
+  const preRound = await readRoundTranslated(id);
   assertCanManageRound(caller, preRound);
   const preContext: RoundWriteContext = { req, ctx, caller, id, round: preRound };
   if (hooks?.scope) await hooks.scope(preContext);
@@ -594,22 +592,19 @@ async function runRoundAndBriefWrite<Extra>(
   let written: Round;
 
   try {
-    const leased = await withRoundAndBriefLease(id, async (roundLeaseId, briefLeaseId) => {
-      const round = await readJson(getPrivateBlobClient(path), RoundSchema, path);
-      assertFrom(spec, round);
-      const briefPath = `round-briefs/${id}.json`;
-      const brief = await readJson(getPrivateBlobClient(briefPath), BriefSchema, briefPath);
-      const c: RoundWriteContext = { req, ctx, caller, id, round, brief };
-      const produced = hooks?.mutate
-        ? await hooks.mutate(c)
-        : (undefined as Extra);
-      round.status = spec.to;
-      await writePrivateJson(briefPath, BriefSchema, brief, briefLeaseId);
-      await writePrivateJson(path, RoundSchema, round, roundLeaseId);
-      return { round, produced };
+    const leased = await mutateRoundWithBrief(id, {
+      beforeBrief: (round) => assertFrom(spec, round),
+      mutate: async ({ round, brief }) => {
+        const c: RoundWriteContext = { req, ctx, caller, id, round, brief };
+        const produced = hooks?.mutate
+          ? await hooks.mutate(c)
+          : (undefined as Extra);
+        round.status = spec.to;
+        return produced;
+      },
     });
     written = leased.round;
-    extra = leased.produced;
+    extra = leased.result;
   } catch (err: unknown) {
     translateStorageError(err);
   }
@@ -620,17 +615,18 @@ async function runRoundAndBriefWrite<Extra>(
 /**
  * The `roundAndBriefRollback` lease strategy (lock): requireId ->
  * requireCoordCaller -> readRoundTranslated -> assertCanManageRound -> scope ->
- * chargeLimiter -> assertFrom -> gate -> withRoundAndBriefLease{ readJson(round)
- * -> assertFrom -> readJson(brief, BriefSchema) -> capture the brief's raw bytes
- * -> mutate({round, brief}) -> `round.status = spec.to` -> writePrivateJson(brief,
- * briefLeaseId) -> writePrivateJson(round, roundLeaseId); if the round write
- * fails, restore the raw brief bytes under the brief lease (a failed restore emits
- * `puretrack.crossBlobReconcileRequired` with `operation` = the row key) and
- * rethrow } -> non-HttpError -> `persistFailure` -> afterCommit -> republish ->
- * respond (200). No preview path.
+ * chargeLimiter -> assertFrom -> gate -> mutateRoundWithBriefOrRestore(
+ * id, name, { beforeBrief: assertFrom -> mutate({round, brief}) ->
+ * `round.status = spec.to` }) — the record captures the brief's raw bytes
+ * before the step, writes the BRIEF then the round, and if the round write
+ * fails it restores the raw brief bytes under the brief lease (a failed
+ * restore emits the cross-blob reconcile event with `operation` = the row
+ * key) and rethrows -> non-HttpError -> `persistFailure` -> afterCommit ->
+ * republish -> respond (200). No preview path.
  *
- * (a) The lease block deliberately does NOT use `translateStorageError`. Every
- * non-`HttpError` becomes `spec.persistFailure`. That includes:
+ * (a) The record operation deliberately does NOT translate, and this runner
+ * does NOT use `translateStorageError` either. Every non-`HttpError` becomes
+ * `spec.persistFailure`. That includes:
  *   - lease acquisition failures, such as a 404 for a round or brief that
  *     vanished, or exhausted 409/412 retries;
  *   - read failures, including `BlobShapeError`;
@@ -639,11 +635,12 @@ async function runRoundAndBriefWrite<Extra>(
  *
  * `HttpError`s thrown by hooks pass through unchanged.
  *
- * (b) `withPrivateLeaseRetry` may re-run the callback when a storage 409/412
- * escapes it (blob.ts:286-304). That is why the committed context is built from
- * the callback's return value, and why `mutate` must be re-entrant: it only
- * reads what `gate` stashed. In-lease `HttpError`s carry `status`, not
- * `statusCode` (http.ts:19-32), so they are never retried.
+ * (b) The record's lease primitive may re-run the step when a storage 409/412
+ * escapes it. That is why the committed context is built from the step's
+ * return value, and why `mutate` must be re-entrant: it only reads what
+ * `gate` stashed. In-lease `HttpError`s carry `status`, not the numeric
+ * status-code field storage errors carry (http.ts:19-32), so they are never
+ * retried.
  *
  * (c) The brief-then-round order, the byte-exact rollback and the reconcile
  * event were moved from `lockRound` (roundsMutate.ts). A failed brief write
@@ -664,9 +661,7 @@ async function runRoundAndBriefRollbackWrite<Extra>(
   const id = requireId(req);
   const caller = await requireCoordCaller(req);
 
-  const path = `rounds/${id}.json`;
-
-  const preRound = await readRoundTranslated(path);
+  const preRound = await readRoundTranslated(id);
   assertCanManageRound(caller, preRound);
   const preContext: RoundWriteContext = { req, ctx, caller, id, round: preRound };
   if (hooks?.scope) await hooks.scope(preContext);
@@ -678,42 +673,17 @@ async function runRoundAndBriefRollbackWrite<Extra>(
   let written: Round;
 
   try {
-    const leased = await withRoundAndBriefLease(id, async (roundLeaseId, briefLeaseId) => {
-      const round = await readJson(getPrivateBlobClient(path), RoundSchema, path);
-      assertFrom(spec, round);
-      const briefPath = `round-briefs/${id}.json`;
-      const brief = await readJson(getPrivateBlobClient(briefPath), BriefSchema, briefPath);
-      const briefClient = getPrivateBlockBlobClient(briefPath);
-      const originalBriefBytes = await briefClient.downloadToBuffer();
-      const c: RoundWriteContext = { req, ctx, caller, id, round, brief };
-      const produced = hooks?.mutate ? await hooks.mutate(c) : (undefined as Extra);
-      round.status = spec.to;
-      await writePrivateJson(briefPath, BriefSchema, brief, briefLeaseId);
-      try {
-        await writePrivateJson(path, RoundSchema, round, roundLeaseId);
-      } catch (roundWriteError: unknown) {
-        await briefClient
-          .upload(originalBriefBytes, originalBriefBytes.length, {
-            blobHTTPHeaders: { blobContentType: "application/json" },
-            conditions: { leaseId: briefLeaseId },
-          })
-          .catch((rollbackError: unknown) => {
-            getTelemetryClient()?.trackEvent({
-              name: "puretrack.crossBlobReconcileRequired",
-              properties: {
-                roundId: id,
-                operation: name,
-                roundWriteError: roundWriteError instanceof Error ? roundWriteError.name : "unknown",
-                rollbackError: rollbackError instanceof Error ? rollbackError.name : "unknown",
-              },
-            });
-          });
-        throw roundWriteError;
-      }
-      return { round, produced };
+    const leased = await mutateRoundWithBriefOrRestore(id, name, {
+      beforeBrief: (round) => assertFrom(spec, round),
+      mutate: async ({ round, brief }) => {
+        const c: RoundWriteContext = { req, ctx, caller, id, round, brief };
+        const produced = hooks?.mutate ? await hooks.mutate(c) : (undefined as Extra);
+        round.status = spec.to;
+        return produced;
+      },
     });
     written = leased.round;
-    extra = leased.produced;
+    extra = leased.result;
   } catch (err: unknown) {
     if (err instanceof HttpError) throw err;
     throw new HttpError(500, spec.persistFailure.code, spec.persistFailure.detail);
@@ -725,14 +695,14 @@ async function runRoundAndBriefRollbackWrite<Extra>(
 /**
  * The `roundRenewing` lease strategy (complete): requireId ->
  * requireCoordCaller -> readRoundTranslated -> assertCanManageRound -> scope ->
- * chargeLimiter -> assertFrom -> withPrivateLeaseRenewing{ readJson(round) ->
- * assertFrom -> gate -> mutate -> `round.status = spec.to` ->
- * writePrivateJson(round, leaseId) } -> translateStorageError -> afterCommit ->
- * republish -> afterResponse (started, never awaited) -> respond (200). No
- * preview path: `?dryRun=true` is ignored.
+ * chargeLimiter -> assertFrom -> mutateRoundRenewing{ assertFrom -> gate ->
+ * mutate -> `round.status = spec.to` } -> translateStorageError ->
+ * afterCommit -> republish -> afterResponse (started, never awaited) ->
+ * respond (200). No preview path: `?dryRun=true` is ignored.
  *
- * (a) ONE renewing round lease, because `mutate` reads the config and scores
- * the round while holding it. Acquisition does not retry, exactly as the
+ * (a) ONE renewing round lease (the record's renewing operation), because
+ * `mutate` reads the config and scores the round while holding it.
+ * Acquisition does not retry, exactly as the
  * pre-#276 handler: a lost race is a 500 INTERNAL. Rejections (403/429 and the
  * 409 status gate) resolve on the unleased pre-read and never take the lease.
  * (b) `gate` runs ONLY inside the lease, on the leased read and before
@@ -753,9 +723,7 @@ async function runRoundRenewingWrite<Extra>(
   const id = requireId(req);
   const caller = await requireCoordCaller(req);
 
-  const path = `rounds/${id}.json`;
-
-  const preRound = await readRoundTranslated(path);
+  const preRound = await readRoundTranslated(id);
   assertCanManageRound(caller, preRound);
   const preContext: RoundWriteContext = { req, ctx, caller, id, round: preRound };
   if (hooks?.scope) await hooks.scope(preContext);
@@ -766,18 +734,16 @@ async function runRoundRenewingWrite<Extra>(
   let written: Round;
 
   try {
-    const leased = await withPrivateLeaseRenewing(path, async (leaseId) => {
-      const round = await readJson(getPrivateBlobClient(path), RoundSchema, path);
+    const leased = await mutateRoundRenewing(id, async (round) => {
       assertFrom(spec, round);
       const c: RoundWriteContext = { req, ctx, caller, id, round };
       if (hooks?.gate) await hooks.gate(c);
       const produced = hooks?.mutate ? await hooks.mutate(c) : (undefined as Extra);
       round.status = spec.to;
-      await writePrivateJson(path, RoundSchema, round, leaseId);
-      return { round, produced };
+      return produced;
     });
     written = leased.round;
-    extra = leased.produced;
+    extra = leased.result;
   } catch (err: unknown) {
     translateStorageError(err);
   }
@@ -788,27 +754,27 @@ async function runRoundRenewingWrite<Extra>(
 /**
  * The `pureTrackEchoes` lease strategy (unlock): requireId ->
  * requireCoordCaller -> readRoundTranslated -> assertCanManageRound -> scope ->
- * chargeLimiter -> mutatePureTrackEchoes(id, cb{ [L] assertFrom -> gate ->
- * mutate({round, brief}) -> `round.status = spec.to` -> capture -> return
- * true }) -> republish -> respond (200).
+ * chargeLimiter -> mutateRoundWithPureTrackEchoes(id, step{ [L] assertFrom ->
+ * gate -> mutate({round, brief}) -> `round.status = spec.to` }) -> republish
+ * -> respond (200).
  *
- * Unlike the other strategies this one DELEGATES the whole
- * lease/read/clone/write/rollback lifecycle to `mutatePureTrackEchoes`
+ * Unlike the other strategies this one's record operation DELEGATES the whole
+ * lease/read/clone/write/rollback lifecycle to the PureTrack-echoes primitive
  * (lib/puretrackStatus.ts), which owns its own dual lease, lazy
  * placeholder-brief creation, structuredClone, brief-then-round persist and
  * same-blob rollback. Two deliberate differences from `roundAndBrief`:
  *
  * - The call sits OUTSIDE translateStorageError: a plain (non-HttpError)
- *   failure from the delegated call — e.g. an injected writePrivateJson
- *   failure — must reach withErrorHandler's generic catch-all UNCHANGED (the
+ *   failure from the record operation — e.g. an injected write failure — must
+ *   reach withErrorHandler's generic catch-all UNCHANGED (the
  *   lowercase "Internal server error" body), exactly as the hand-rolled
  *   handler behaved (roundsMutate.ts, pre-#277).
  * - There is NO pre-lease status check: the ONLY `assertFrom` runs inside the
- *   callback, on the leased clone. The unleased pre-read exists solely to
+ *   step, on the leased clone. The unleased pre-read exists solely to
  *   feed `assertCanManageRound` — it deliberately never gates status, so a
  *   status change between pre-read and lease is caught by the in-lease check,
- *   and `ensureBriefExists` never gets to placeholder-create a brief for a
- *   round that does not exist (the pre-read 404s first).
+ *   and the PureTrack-echoes primitive never gets to placeholder-create a
+ *   brief for a round that does not exist (the pre-read 404s first).
  */
 async function runPureTrackEchoesWrite<Extra>(
   req: HttpRequest,
@@ -819,24 +785,17 @@ async function runPureTrackEchoesWrite<Extra>(
   const id = requireId(req);
   const caller = await requireCoordCaller(req);
 
-  const path = `rounds/${id}.json`;
-
   // The shared unleased preamble: pre-read (scope input ONLY — never a status
   // gate), fine scope, limiter. No try/catch — readRoundTranslated
   // self-contains its translation and hook HttpErrors propagate straight to
   // withErrorHandler.
-  const preRound = await readRoundTranslated(path);
+  const preRound = await readRoundTranslated(id);
   assertCanManageRound(caller, preRound);
   const preContext: RoundWriteContext = { req, ctx, caller, id, round: preRound };
   if (hooks?.scope) await hooks.scope(preContext);
   await chargeLimiter(req, caller, spec);
 
-  let capturedRound: Round | undefined;
-  // Definite-assignment: TS cannot prove the callback runs, but the guard
-  // below throws unless capturedRound was set — and both are assigned together.
-  let capturedExtra!: Extra;
-
-  await mutatePureTrackEchoes(id, async ({ round, brief }) => {
+  const committed = await mutateRoundWithPureTrackEchoes(id, async ({ round, brief }) => {
     assertFrom(spec, round);
     const c: RoundWriteContext = { req, ctx, caller, id, round, brief };
     if (hooks?.gate) await hooks.gate(c);
@@ -844,16 +803,10 @@ async function runPureTrackEchoesWrite<Extra>(
       ? await hooks.mutate(c)
       : (undefined as Extra);
     round.status = spec.to;
-    capturedRound = round;
-    capturedExtra = produced;
-    return true;
+    return produced;
   });
 
-  // Defensive guard, preserved from the pre-#277 handler: every actual code
-  // path either throws or captures, but an uncaptured round is a 500, never a
-  // silently empty 200.
-  if (capturedRound === undefined) throw new HttpError(500, "INTERNAL");
-  return republishAndRespond({ req, ctx, caller, id, round: capturedRound }, hooks, capturedExtra);
+  return republishAndRespond({ req, ctx, caller, id, round: committed.round }, hooks, committed.result);
 }
 
 /**
