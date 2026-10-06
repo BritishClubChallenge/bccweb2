@@ -14,12 +14,10 @@
  * POST   /api/rounds/{id}/uncancel         — Cancelled → Proposed
  * POST   /api/rounds/{id}/complete         — Locked → Complete + score + recompute
  *
- * Nine of these endpoints (create, update, confirm, brief-complete, reopen,
- * cancel, uncancel, unlock, lock) are rows in the `ROUND_WRITES` table in
+ * All ten endpoints are rows in the `ROUND_WRITES` table in
  * lib/roundTransitions.ts — the handlers below are one-liners over
- * `applyRoundWrite`, each carrying only its own hooks. `completeRound` remains
- * bespoke here pending #276; the brief/PureTrack/PDF/email helpers the hooks
- * share live here too.
+ * `applyRoundWrite`, each carrying only its own hooks; the
+ * brief/PureTrack/PDF/email/scoring helpers the hooks share live here too.
  */
 
 import {
@@ -58,19 +56,11 @@ import {
   getBlobClient,
   getPrivateBlobClient,
   withLease,
-  withPrivateLeaseRenewing,
 } from "../lib/blob.js";
 import { readJson, writeJson, writePrivateJson } from "../lib/blobJson.js";
-import {
-  getCallerIdentity,
-  unauthorizedResponse,
-  forbiddenResponse,
-} from "../lib/auth.js";
 import { HttpError, withErrorHandler } from "../lib/http.js";
-import { assertCanManageRound, isCoord } from "../lib/roundAuth.js";
 import { applyRoundWrite } from "../lib/roundTransitions.js";
-import { mutationRateLimit } from "../lib/rateLimit.js";
-import { updateRoundsIndex, recomputeSeason } from "../lib/recompute.js";
+import { recomputeSeason } from "../lib/recompute.js";
 import { setBriefPdfStatus } from "../lib/briefPdf.js";
 import { enqueueBriefPdf, enqueuePureTrackGroupJob } from "../lib/queue.js";
 import {
@@ -1097,110 +1087,71 @@ function uncancelRound(
 }
 
 // ─── POST /api/rounds/{id}/complete ───────────────────────────────────────────
+
 /**
- * Locked → Complete.
- * Runs scoreRound(), sets isLocked = false, then recomputes season derived
- * blobs (league table + results). The recompute is best-effort — the round
- * is already marked Complete before it runs.
+ * Post-flight safety sweep: every Filled slot must be accounted for before the
+ * round may complete. This is complete's `gate`, which the `roundRenewing`
+ * strategy runs ONLY on the leased read and before `mutate` reads the config
+ * or scores, so a firing gate leaves the round untouched at Locked. The
+ * Filled/pilotId/noScore rules live in `findUnaccountedSlots`.
+ *
+ * `updateAccounted` — the only writer of `slot.accountedFor` — takes this same
+ * round-blob lease, so no accounting can land between this check and the
+ * commit; unlike lockRound's signature gate there is no ledger lag to reason
+ * about.
  */
-async function completeRound(
-  req: HttpRequest,
-  _ctx: InvocationContext
-): Promise<HttpResponseInit> {
-  const id = req.params["id"];
-  if (!id) throw new HttpError(400, "MISSING_ROUND_ID", "Missing round id");
-
-  const caller = await getCallerIdentity(req);
-  if (!caller) return unauthorizedResponse();
-  if (!isCoord(caller.roles)) return forbiddenResponse();
-
-  const path = `rounds/${id}.json`;
-  let current: Round;
-
-  try {
-    current = await readJson(getPrivateBlobClient(path), RoundSchema, path);
-  } catch (err: unknown) {
-    if ((err as { statusCode?: number }).statusCode === 404) {
-      throw new HttpError(404, "NOT_FOUND", "Round not found");
-    }
-    throw new HttpError(500, "INTERNAL");
-  }
-
-  assertCanManageRound(caller, current);
-  await mutationRateLimit(req, caller, "completeRound", "heavy");
-
-  if (current.status !== "Locked") {
-    return {
-      status: 409,
-      jsonBody: {
-        error: `Round must be Locked to complete (currently ${current.status})`,
-      },
-    };
-  }
-
-  let updated: Round;
-
-  try {
-    updated = await withPrivateLeaseRenewing(path, async (leaseId) => {
-      // Score the LEASED read — NOT a pre-lease snapshot — so a mutation
-      // committed between the pre-lease read and lease acquisition can never be
-      // stale-overwritten by an outdated score (legacy RoundsController.cs:305-310).
-      const r = await readJson(getPrivateBlobClient(path), RoundSchema, path);
-
-      if (r.status !== "Locked") {
-        throw new HttpError(
-          409,
-          "CONFLICT",
-          `Round must be Locked to complete (currently ${r.status})`
-        );
-      }
-
-      // Post-flight safety sweep: every Filled slot must be accounted for before
-      // the round may complete. Checked on the leased read `r`, and before any
-      // scoring or write, so a firing gate leaves the round untouched at Locked.
-      // The Filled/pilotId/noScore rules live in `findUnaccountedSlots`.
-      //
-      // `updateAccounted` — the only writer of `slot.accountedFor` — takes this
-      // same round-blob lease, so no accounting can land between this check and
-      // the commit below; unlike lockRound's signature gate there is no ledger
-      // lag to reason about.
-      const unaccounted = findUnaccountedSlots(r);
-      if (unaccounted.length > 0) {
-        throw new HttpError(
-          409,
-          "PILOTS_NOT_ACCOUNTED_FOR",
-          `Unaccounted-for slots: ${formatSlotRefs(unaccounted)}`,
-        );
-      }
-
-      const config = await loadConfig();
-      const { round: scored, derivation } = scoreRoundEnforcingValidation(r, config);
-      scored.scoring = { scoredAt: new Date().toISOString(), ...derivation };
-      scored.status = "Complete";
-      scored.isLocked = false;
-
-      await writePrivateJson(path, RoundSchema, scored, leaseId);
-      return scored;
-    });
-  } catch (err: unknown) {
-    if (err instanceof HttpError) throw err;
-    const e = err as { statusCode?: number };
-    if (e.statusCode === 404) throw new HttpError(404, "NOT_FOUND", "Round not found");
-    throw new HttpError(500, "INTERNAL");
-  }
-
-  // Update index first so public data is immediately correct
-  await updateRoundsIndex(updated);
-
-  // Recompute season derived blobs (best-effort — don't fail the response)
-  recomputeSeason(updated.season.year).catch((err) => {
-    console.error(
-      `[completeRound] recomputeSeason(${updated.season.year}) failed:`,
-      err
+function assertEverySlotAccountedFor(round: Round): void {
+  const unaccounted = findUnaccountedSlots(round);
+  if (unaccounted.length > 0) {
+    throw new HttpError(
+      409,
+      "PILOTS_NOT_ACCOUNTED_FOR",
+      `Unaccounted-for slots: ${formatSlotRefs(unaccounted)}`,
     );
-  });
+  }
+}
 
-  return { status: 200, jsonBody: updated };
+/**
+ * POST /api/rounds/{id}/complete — Locked → Complete, run by the `roundRenewing`
+ * strategy in lib/roundTransitions.ts: one renewing round lease, with the
+ * status gate on the unleased pre-read and again on the leased read.
+ *
+ * - gate (leased read only): 409 PILOTS_NOT_ACCOUNTED_FOR unless every Filled
+ *   slot is accounted for.
+ * - mutate (under the lease): score the LEASED read — NOT a pre-lease snapshot —
+ *   so a mutation committed between the pre-read and lease acquisition can
+ *   never be stale-overwritten by an outdated score (legacy
+ *   RoundsController.cs:305-310); stamp `scoring` and clear `isLocked`. The
+ *   executor sets `status`, writes and republishes.
+ * - afterResponse: recompute the season's derived blobs (league table +
+ *   results) best-effort after the response. The round is already Complete,
+ *   so a failure is logged, never surfaced.
+ */
+function completeRound(
+  req: HttpRequest,
+  ctx: InvocationContext
+): Promise<HttpResponseInit> {
+  return applyRoundWrite(req, ctx, "complete", {
+    gate: ({ round }) => assertEverySlotAccountedFor(round),
+    mutate: async ({ round }) => {
+      // scoreRound mutates and returns the same object
+      // (packages/scoring/src/index.ts), so `scored` IS the leased round the
+      // executor persists.
+      const { round: scored, derivation } = scoreRoundEnforcingValidation(
+        round,
+        await loadConfig(),
+      );
+      scored.scoring = { scoredAt: new Date().toISOString(), ...derivation };
+      scored.isLocked = false;
+    },
+    afterResponse: ({ round }) =>
+      recomputeSeason(round.season.year).catch((err: unknown) => {
+        console.error(
+          `[completeRound] recomputeSeason(${round.season.year}) failed:`,
+          err
+        );
+      }),
+  });
 }
 
 // ─── Registration ─────────────────────────────────────────────────────────────

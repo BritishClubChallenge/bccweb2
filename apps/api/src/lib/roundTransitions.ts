@@ -1,29 +1,28 @@
 // SPDX-FileCopyrightText: 2026 British Club Challenge authors
 // SPDX-License-Identifier: MPL-2.0
 /**
- * The round write TABLE and its EXECUTOR (issues #274 / #277 / #275).
+ * The round write TABLE and its EXECUTOR (issues #274 / #277 / #275 / #276).
  *
- * `ROUND_WRITES` is the state machine for the round writes routed here: each
- * row declares the transition's `from`/`to`, the `lease` strategy, and the
- * rate-limit `endpoint`/`tier`, so a converted handler in
- * `functions/roundsMutate.ts` is a one-liner over `applyRoundWrite`. The shared
- * pieces — id guard, caller preamble, fine scope check, limiter, storage-error
- * translation, post-commit follow-up and the public-index republish — each
+ * `ROUND_WRITES` is the state machine for every round write: each row
+ * declares the transition's `from`/`to`, the `lease` strategy, and the
+ * rate-limit `endpoint`/`tier`, so each handler in `functions/roundsMutate.ts`
+ * is a one-liner over `applyRoundWrite`. The shared pieces — id guard, caller
+ * preamble, fine scope check, limiter, storage-error translation, post-commit
+ * follow-up, the public-index republish and post-response follow-up — each
  * exist exactly once below.
  *
- * Todo 1 of #277 covers the four PURE status transitions (confirm / reopen /
- * cancel / uncancel): the whole mutation is `round.status = to`. Nine writes
- * are now routed, including lock (#275) on the `roundAndBriefRollback`
- * strategy; `completeRound` remains bespoke in `functions/roundsMutate.ts`
- * (#276).
+ * Todo 1 of #277 covered the four PURE status transitions (confirm / reopen /
+ * cancel / uncancel): the whole mutation is `round.status = to`. All ten
+ * writes are now routed, including lock (#275) on the `roundAndBriefRollback`
+ * strategy and complete (#276) on the `roundRenewing` strategy.
  *
  * Ordering: the read/limiter pattern is PER-STRATEGY, not executor-wide. Only
  * the plain `round` strategy reads `rounds/{id}.json` once, inside its lease,
  * and runs `mutationRateLimit` there too. `roundAndBrief`,
- * `roundAndBriefRollback` and `pureTrackEchoes` pre-read unleased (charging
- * the limiter in the preamble) and read again under their leases; `create`
- * reads no existing round and takes no lease. See the comment at
- * `chargeLimiter` before moving it.
+ * `roundAndBriefRollback`, `roundRenewing` and `pureTrackEchoes` pre-read
+ * unleased (charging the limiter in the preamble) and read again under their
+ * leases; `create` reads no existing round and takes no lease. See the comment
+ * at `chargeLimiter` before moving it.
  */
 
 import type {
@@ -34,7 +33,7 @@ import type {
 import type { CallerIdentity, Round, RoundBrief, RoundStatus } from "@bccweb/types";
 import { BriefSchema, RoundSchema } from "@bccweb/schemas";
 import { getCallerIdentity } from "./auth.js";
-import { getPrivateBlobClient, getPrivateBlockBlobClient, withPrivateLease, withRoundAndBriefLease } from "./blob.js";
+import { getPrivateBlobClient, getPrivateBlockBlobClient, withPrivateLease, withPrivateLeaseRenewing, withRoundAndBriefLease } from "./blob.js";
 import { readJson, writePrivateJson } from "./blobJson.js";
 import { HttpError } from "./http.js";
 import { mutationRateLimit, type MutationRateLimitTier } from "./rateLimit.js";
@@ -45,14 +44,15 @@ import { getTelemetryClient } from "./telemetry.js";
 
 export type RoundTransitionName = "confirm" | "reopen" | "cancel" | "uncancel";
 
-/** The writes the executor can run (`complete` joins in #276). */
+/** Every round write; the executor runs all ten. */
 export type RoundWriteName =
   | RoundTransitionName
   | "create"
   | "update"
   | "briefComplete"
   | "unlock"
-  | "lock";
+  | "lock"
+  | "complete";
 
 interface RoundWriteSpecBase {
   /** Rate-limit bucket key suffix — `mutation:{tier}:{endpoint}`. */
@@ -66,7 +66,7 @@ export interface TransitionWriteSpec extends RoundWriteSpecBase {
   readonly from: readonly RoundStatus[];
   readonly to: RoundStatus;
   /** Lease strategy. */
-  readonly lease: "round" | "roundAndBrief" | "pureTrackEchoes";
+  readonly lease: "round" | "roundAndBrief" | "pureTrackEchoes" | "roundRenewing";
 }
 
 /**
@@ -170,6 +170,14 @@ export const ROUND_WRITES: Record<RoundWriteName, RoundWriteSpec> = {
         "Failed to persist the brief while locking — the round remains BriefComplete; reopen and re-complete before retrying the lock",
     },
   },
+  complete: {
+    kind: "transition",
+    from: ["Locked"],
+    to: "Complete",
+    lease: "roundRenewing",
+    endpoint: "completeRound",
+    tier: "heavy",
+  },
 };
 
 export const ROUND_TRANSITIONS: Record<RoundTransitionName, RoundTransitionSpec> =
@@ -190,12 +198,16 @@ export function expectedStatusDetail(
 
 /**
  * Everything a hook needs: the request-scoped values plus the round. Whether
- * `round` is LEASED depends on the hook and strategy: preview and
- * strategy-preamble hooks (`scope`/`gate` on `roundAndBrief` and
- * `pureTrackEchoes`, and every preview-path hook) receive the UNLEASED
- * pre-read; `mutate` and the `round` strategy's in-lease hooks receive the
- * fresh leased read. Hooks must not rely on the lease being held unless they
- * run under one.
+ * `round` is LEASED depends on the hook and strategy:
+ * - `scope` sees the UNLEASED pre-read on every strategy except the plain
+ *   `round` strategy's real path, where it runs inside the lease;
+ * - `gate` sees the unleased pre-read on `roundAndBrief` and
+ *   `roundAndBriefRollback`, and the fresh LEASED read on `round` (real path),
+ *   `pureTrackEchoes` (the leased clone) and `roundRenewing`;
+ * - every preview-path hook sees the unleased read;
+ * - `mutate` always sees the fresh leased read;
+ * - `afterCommit` and `afterResponse` see the committed round.
+ * Hooks must not rely on the lease being held unless they run under one.
  */
 export interface RoundWriteContext {
   readonly req: HttpRequest;
@@ -231,7 +243,9 @@ export interface RoundWriteContext {
  *   Snapshots and the lock candidate. Checks that need the LEASED brief throw
  *   from `mutate` before it changes anything: brief-complete's
  *   `ROSTER_INCOMPLETE`, and lock's `BRIEF_HASH_MISMATCH`,
- *   `SIGNATURE_LEDGER_UNAVAILABLE` and `SIGNATURES_INCOMPLETE`.
+ *   `SIGNATURE_LEDGER_UNAVAILABLE` and `SIGNATURES_INCOMPLETE`. For
+ *   `roundRenewing` it runs ONLY inside the lease, on the leased read and
+ *   before `mutate` (complete's accounted-for gate).
  * - `preview`: honoured only when `req.query.get("dryRun") === "true"`. Runs
  *   on an UNLEASED pre-read (readRoundTranslated -> assertCanManageRound ->
  *   scope -> chargeLimiter -> assertFrom -> gate), returns the 200 body
@@ -243,6 +257,12 @@ export interface RoundWriteContext {
  *   `ctx.error`, so it can never fail the write or skip the republish. It never
  *   runs for rejections or previews. It differs from create's `after`, which
  *   runs after the republish and is not contained.
+ * - `afterResponse`: fire-and-forget follow-up on the committed round, started
+ *   after the republish and after the 200 body is built, and NEVER awaited, so
+ *   its work runs after the response. The executor contains a synchronous
+ *   throw or a rejection (`fireAfterResponse`), so it can never fail the write.
+ *   It never runs for rejections or previews. Log from it with `console.*`,
+ *   not `ctx`: by the time it settles the invocation has usually completed.
  * - `respond`: shapes the success body; defaults to the round.
  */
 export interface RoundWriteHooks<Extra = undefined> {
@@ -251,6 +271,7 @@ export interface RoundWriteHooks<Extra = undefined> {
   readonly preview?: (c: RoundWriteContext) => unknown;
   readonly mutate?: (c: RoundWriteContext) => Extra | Promise<Extra>;
   readonly afterCommit?: (c: RoundWriteContext) => void | Promise<void>;
+  readonly afterResponse?: (c: RoundWriteContext) => void | Promise<void>;
   readonly respond?: (round: Round, extra: Extra) => unknown;
 }
 
@@ -335,7 +356,8 @@ async function chargeLimiter(
   // DELIBERATELY INSIDE THE LEASE in the `round` strategy (its ONLY call
   // site there) — do not hoist this into the handler. The other strategies
   // call it from their UNLEASED preambles instead (see runRoundAndBriefWrite /
-  // runRoundAndBriefRollbackWrite / runPureTrackEchoesWrite): they read the
+  // runRoundAndBriefRollbackWrite / runRoundRenewingWrite / runPureTrackEchoesWrite):
+  // they read the
   // round before the lease, so the scope check and the limiter both resolve
   // pre-lease there.
   // rateLimit.ts:138-164 requires the scope check to resolve BEFORE the
@@ -375,10 +397,37 @@ async function republish(round: Round): Promise<void> {
 }
 
 /**
- * The shared post-commit tail: afterCommit (contained) -> republish (outside
- * every try/catch) -> respond (200). The try/catch wraps ONLY the `afterCommit`
- * call so a post-commit throw can never fail the write or skip the republish;
- * `republish` itself stays outside every try/catch (see `republish` above).
+ * Start the post-response hook: called after the republish and NEVER awaited,
+ * so its work runs after the 200 is returned. A synchronous throw or a
+ * rejection is contained here, so it can never fail the committed write. It
+ * logs through `console.error`, not `ctx`: a rejection usually settles after
+ * the invocation has completed, when the Functions host no longer accepts
+ * context logging for it.
+ */
+function fireAfterResponse(
+  committed: RoundWriteContext,
+  hook: (c: RoundWriteContext) => void | Promise<void>
+): void {
+  const report = (err: unknown): void => {
+    console.error(
+      `[round ${committed.id}] post-response work failed after the write committed:`,
+      err
+    );
+  };
+  try {
+    void Promise.resolve(hook(committed)).catch(report);
+  } catch (err: unknown) {
+    report(err);
+  }
+}
+
+/**
+ * The shared post-commit tail: afterCommit (awaited, contained) -> republish
+ * (outside every try/catch) -> build the 200 body -> afterResponse (started,
+ * never awaited, contained by `fireAfterResponse`) -> return. The try/catch
+ * wraps ONLY the `afterCommit` call so a post-commit throw can never fail the
+ * write or skip the republish; `republish` itself stays outside every
+ * try/catch (see `republish` above).
  */
 async function republishAndRespond<Extra>(
   committed: RoundWriteContext,
@@ -396,10 +445,12 @@ async function republishAndRespond<Extra>(
     }
   }
   await republish(committed.round);
-  return {
+  const response: HttpResponseInit = {
     status: 200,
     jsonBody: hooks?.respond ? hooks.respond(committed.round, extra) : committed.round,
   };
+  if (hooks?.afterResponse) fireAfterResponse(committed, hooks.afterResponse);
+  return response;
 }
 
 /**
@@ -672,6 +723,69 @@ async function runRoundAndBriefRollbackWrite<Extra>(
 }
 
 /**
+ * The `roundRenewing` lease strategy (complete): requireId ->
+ * requireCoordCaller -> readRoundTranslated -> assertCanManageRound -> scope ->
+ * chargeLimiter -> assertFrom -> withPrivateLeaseRenewing{ readJson(round) ->
+ * assertFrom -> gate -> mutate -> `round.status = spec.to` ->
+ * writePrivateJson(round, leaseId) } -> translateStorageError -> afterCommit ->
+ * republish -> afterResponse (started, never awaited) -> respond (200). No
+ * preview path: `?dryRun=true` is ignored.
+ *
+ * (a) ONE renewing round lease, because `mutate` reads the config and scores
+ * the round while holding it. Acquisition does not retry, exactly as the
+ * pre-#276 handler: a lost race is a 500 INTERNAL. Rejections (403/429 and the
+ * 409 status gate) resolve on the unleased pre-read and never take the lease.
+ * (b) `gate` runs ONLY inside the lease, on the leased read and before
+ * `mutate`: complete's accounted-for gate must judge the round it commits and
+ * must fire before the config is read.
+ * (c) The leased re-read and second `assertFrom` are check-then-act: the
+ * status may move between the pre-read and lease acquisition, and `mutate`
+ * must score the LEASED read so a racing edit is never stale-overwritten.
+ * Storage failures translate exactly as the pre-#276 handler's catch did:
+ * HttpError passthrough, a vanished blob is 404, anything else 500 INTERNAL.
+ */
+async function runRoundRenewingWrite<Extra>(
+  req: HttpRequest,
+  ctx: InvocationContext,
+  spec: TransitionWriteSpec,
+  hooks: RoundWriteHooks<Extra> | undefined
+): Promise<HttpResponseInit> {
+  const id = requireId(req);
+  const caller = await requireCoordCaller(req);
+
+  const path = `rounds/${id}.json`;
+
+  const preRound = await readRoundTranslated(path);
+  assertCanManageRound(caller, preRound);
+  const preContext: RoundWriteContext = { req, ctx, caller, id, round: preRound };
+  if (hooks?.scope) await hooks.scope(preContext);
+  await chargeLimiter(req, caller, spec);
+  assertFrom(spec, preRound);
+
+  let extra: Extra;
+  let written: Round;
+
+  try {
+    const leased = await withPrivateLeaseRenewing(path, async (leaseId) => {
+      const round = await readJson(getPrivateBlobClient(path), RoundSchema, path);
+      assertFrom(spec, round);
+      const c: RoundWriteContext = { req, ctx, caller, id, round };
+      if (hooks?.gate) await hooks.gate(c);
+      const produced = hooks?.mutate ? await hooks.mutate(c) : (undefined as Extra);
+      round.status = spec.to;
+      await writePrivateJson(path, RoundSchema, round, leaseId);
+      return { round, produced };
+    });
+    written = leased.round;
+    extra = leased.produced;
+  } catch (err: unknown) {
+    translateStorageError(err);
+  }
+
+  return republishAndRespond({ req, ctx, caller, id, round: written }, hooks, extra);
+}
+
+/**
  * The `pureTrackEchoes` lease strategy (unlock): requireId ->
  * requireCoordCaller -> readRoundTranslated -> assertCanManageRound -> scope ->
  * chargeLimiter -> mutatePureTrackEchoes(id, cb{ [L] assertFrom -> gate ->
@@ -810,6 +924,9 @@ export function applyRoundWrite<Extra = undefined>(
   }
   if (spec.kind === "transition" && spec.lease === "roundAndBriefRollback") {
     return runRoundAndBriefRollbackWrite(req, ctx, name, spec, hooks as RoundWriteHooks<Extra> | undefined);
+  }
+  if (spec.kind === "transition" && spec.lease === "roundRenewing") {
+    return runRoundRenewingWrite(req, ctx, spec, hooks as RoundWriteHooks<Extra> | undefined);
   }
   if (spec.kind === "transition" && spec.lease === "pureTrackEchoes") {
     return runPureTrackEchoesWrite(
