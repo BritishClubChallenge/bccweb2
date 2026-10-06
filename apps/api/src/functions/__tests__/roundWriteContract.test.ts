@@ -108,6 +108,10 @@ const ROUND_TRANSITIONS_SOURCE = await fs.readFile(
   path.resolve(HERE, "..", "..", "lib", "roundTransitions.ts"),
   "utf8",
 );
+const ROUND_RECORD_SOURCE = await fs.readFile(
+  path.resolve(HERE, "..", "..", "lib", "roundRecord.ts"),
+  "utf8",
+);
 
 /** The body of one handler function, up to the next top-level construct. */
 function handlerSource(src: string, name: string): string {
@@ -281,7 +285,6 @@ describe("roundTransitions.ts keeps the shared pieces single (issue 277)", () =>
     "mutationRateLimit(req, caller, spec.endpoint, spec.tier)",
     "getCallerIdentity(",
     "updateRoundsIndex(",
-    '"Round not found"',
     '"MISSING_ROUND_ID"',
   ])("contains exactly one occurrence of %s", (needle) => {
     expect(ROUND_TRANSITIONS_SOURCE.split(needle).length - 1).toBe(1);
@@ -1176,9 +1179,9 @@ describe("lockRound on the round write table (issue 275)", () => {
     expect(ROUNDS_MUTATE_SOURCE).not.toContain("crossBlobReconcileRequired");
   });
 
-  it("k4 roundTransitions.ts contains exactly one puretrack.crossBlobReconcileRequired", () => {
+  it("k4 roundRecord.ts contains exactly one puretrack.crossBlobReconcileRequired (issue 282)", () => {
     expect(
-      ROUND_TRANSITIONS_SOURCE.split('"puretrack.crossBlobReconcileRequired"')
+      ROUND_RECORD_SOURCE.split('"puretrack.crossBlobReconcileRequired"')
         .length - 1,
     ).toBe(1);
   });
@@ -1217,9 +1220,57 @@ describe("completeRound on the round write table (issue 276)", () => {
     );
   });
 
-  it("m4 roundTransitions.ts contains exactly one withPrivateLeaseRenewing(", () => {
+  it("m4 roundRecord.ts contains exactly one withPrivateLeaseRenewing( (issue 282)", () => {
     expect(
-      ROUND_TRANSITIONS_SOURCE.split("withPrivateLeaseRenewing(").length - 1,
+      ROUND_RECORD_SOURCE.split("withPrivateLeaseRenewing(").length - 1,
     ).toBe(1);
+  });
+});
+
+// ─── (n) The round record owns storage (issue 282) ───────────────────────────
+
+describe("roundRecord.ts owns the round's storage (issue 282)", () => {
+  it.each([
+    '"Round not found"',
+    '"puretrack.crossBlobReconcileRequired"',
+    "withPrivateLeaseRenewing(",
+    "withPrivateLease(",
+    "mutatePureTrackEchoes(",
+    "`rounds/${",
+    "`round-briefs/${",
+  ])("n1 roundRecord.ts contains exactly one occurrence of %s", (needle) => {
+    expect(ROUND_RECORD_SOURCE.split(needle).length - 1).toBe(1);
+  });
+
+  it("n2 roundRecord.ts never imports the executor", () => {
+    expect(ROUND_RECORD_SOURCE).not.toContain("roundTransitions");
+  });
+
+  it.each([
+    '"Round not found"',
+    '"puretrack.crossBlobReconcileRequired"',
+    "withPrivateLease(",
+    "withPrivateLeaseRenewing(",
+    "withRoundAndBriefLease(",
+    "mutatePureTrackEchoes(",
+    "readJson(",
+    "writePrivateJson(",
+    "getPrivateBlobClient(",
+    "getPrivateBlockBlobClient(",
+    "downloadToBuffer",
+    "`rounds/${",
+    "`round-briefs/${",
+    'from "./blob.js"',
+    'from "./blobJson.js"',
+    'from "./puretrackStatus.js"',
+    'from "./telemetry.js"',
+    'from "@bccweb/schemas"',
+    "statusCode",
+  ])("n3 roundTransitions.ts contains no %s", (needle) => {
+    expect(ROUND_TRANSITIONS_SOURCE).not.toContain(needle);
+  });
+
+  it("n4 roundTransitions.ts reads and writes rounds only through roundRecord.ts", () => {
+    expect(ROUND_TRANSITIONS_SOURCE).toContain('from "./roundRecord.js"');
   });
 });
