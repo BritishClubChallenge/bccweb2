@@ -190,7 +190,8 @@ guarded by `pdfAttemptId` plus an atomic compare-and-set commit
 
 The sign endpoints enqueue `{roundId}` onto `signtofly-reflect`. The `signaturesReflect`
 queue-trigger consumer (`apps/api/src/functions/signaturesReflect.ts`) re-materializes
-`slot.signToFly` for the whole round by replaying the signature ledger (`signTofly/*`),
+`slot.signToFly` for the whole round by replaying the signature ledger through
+`signTofly/resolution.ts` (the rule owner shared with `lockRound`),
 then writes the updated round blob. This keeps the HTTP response fast even though the
 full-round recompute can be expensive. Operator recovery:
 `POST /api/rounds/{id}/reflect-sign-to-fly` (Admin/scoped-coord) re-runs the reflect

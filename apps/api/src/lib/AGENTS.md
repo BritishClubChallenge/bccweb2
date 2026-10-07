@@ -127,11 +127,11 @@ don't re-read the source.
 
 - `findUnaccountedSlots(round)` — Filled slots with `accountedFor !== true`; backs
   `completeRound`'s `409 PILOTS_NOT_ACCOUNTED_FOR` gate. Counts null-`pilotId` and
-  `noScore` slots (a physical-presence check, unlike `findUnsignedSlots`).
+  `noScore` slots (a physical-presence check, unlike `SignToFlyResolution.unsignedSlots`).
 - `formatSlotRefs(slots)` — renders `Team #place (pilotId)` joined by `"; "`;
   shared by that gate and `lockRound`'s `SIGNATURES_INCOMPLETE` detail so both
-  read identically. `findUnsignedSlots` stays in `signTofly/completeness.ts` (it
-  needs the brief + ledger); only the round-only scan and the formatter live here.
+  read identically. `SignToFlyResolution.unsignedSlots` lives in `signTofly/resolution.ts`
+  (it needs the brief + ledger); only the round-only scan and the formatter live here.
 
 ## roundRecord.ts — the round record store
 
@@ -396,24 +396,46 @@ don't re-read the source.
 ## signTofly/ — sign-to-fly workflow
 
 - `ledger.ts` — signature path builders, `read/write/listSignaturesForRound`,
-  `getLatestSignature`, `buildSignaturePayload` (brief+wording hash, IP, UA), `extractIp`
-  (`x-forwarded-for` → `x-azure-clientip`). Writes are create-only; path version = source of truth.
+  `listSignaturesForOccupancy` (one `teamId:place:pilotId` prefix), `buildSignaturePayload`
+  (brief+wording hash, IP, UA), `extractIp` (`x-forwarded-for` → `x-azure-clientip`). Writes
+  are create-only. The signature payload's `briefVersion` is what every rule reads; writers
+  derive the path from it. All signature `listBlobsFlat` listing stays in this file.
 - `wording.ts` — `getActiveWording`/`getWording(version)`/`addWordingVersion`/`listWordingVersions`;
   missing pointer → `503 WORDING_NOT_SEEDED`.
 - `briefVersion.ts` — `MATERIAL_BRIEF_FIELDS`, `computeBriefHash`, `diffMaterialFields`
   (non-material edits don't change the hash).
-- `invalidate.ts` — `invalidatePriorSignToFlyFlags(...)` clears `slot.signToFly` when latest
-  signature predates current brief version.
-- `slotSignatureVersions.ts` — single owner of the brief-version rule: `slotKey`,
-  `latestSignedVersions` (newest per `teamId:place`; equal versions break by `signedAt`),
-  `currentBriefVersion`, `isSignedAtVersion` (pilot must match the slot's occupant),
-  `isSupersededAtVersion`. `reflect.ts`, `completeness.ts` and `invalidate.ts` all route
-  through it so the flags and the lock gate cannot drift apart.
-- `reflect.ts` — `materializeSignToFly(round,brief,signatures)` writes `slot.signToFly` from
-  the ledger; `reflectRoundSignToFly(roundId)` leases the round and applies it, and
-  **early-returns unless the round is `BriefComplete`**.
-- `completeness.ts` — `findUnsignedSlots(round,brief,signatures)` backs the lock gate:
-  Filled slots with no current-version signature by their current pilot. `lockRound` throws
-  `409 SIGNATURES_INCOMPLETE` on any hit and otherwise materializes the flags itself before
-  the round leaves `BriefComplete`.
+- `resolution.ts` — single owner of the sign-to-fly rule. `signatureLedgerView(signatures)`
+  returns a `SignatureLedgerView` (`hasSignedAnyVersion(occupancy)`,
+  `resolveAgainst(brief)`); `resolveAgainst` returns a `SignToFlyResolution` (`briefVersion`,
+  `isSigned`, `unsignedSlots`, `applyTo`, `demoteSuperseded`). Legacy signatures
+  (`briefVersion === null`) are ignored. The latest signature per occupancy follows one total
+  order: higher `briefVersion` wins, then later `signedAt` (null lowest), then higher `id`.
+  Four consumers route through it so the flags and gates cannot drift: the lock gate
+  (`unsignedSlots` + `applyTo`), brief-complete including `dryRun` (`demoteSuperseded`), the
+  reflect job (`applyTo`) and self-unregistration (`hasSignedAnyVersion` only). Two
+  loaders: `readRoundSignatureLedger(roundId)` (round-wide) and
+  `readOccupancySignatureLedger(...)` (occupancy-scoped). Neither lists blobs itself.
+- `reflect.ts` — `reflectRoundSignToFly(roundId)` leases the round, reads the ledger inside the
+  lease and applies `resolveAgainst(brief).applyTo(round)`; it **early-returns unless the
+  round is `BriefComplete`**. `lockRound` runs the same resolution itself before the round
+  leaves `BriefComplete` and throws `409 SIGNATURES_INCOMPLETE` on any unsigned Filled slot.
 - `auditLog.ts` — `appendAuditLine(category,payload)` append-only NDJSON (`audit/<cat>-YYYY-MM-DD.jsonl`).
+
+### Accepted deviations from pre-#279 behaviour (S1-S4)
+
+- **S1** — `invalidatedSignatureCount` is counted per slot. Before, a round with two slots
+  sharing `(team.id, placeInTeam)` could over-count through the `slotKey` map. That shape is
+  possible: `teams.ts` pushes a new slot when `choosePlace` reuses an Empty place left by
+  `clearRegistrationSlot` (`roundRegistrationRoster.ts`). Now each demoted slot counts once.
+- **S2** — self-unregistration judges the signature version from the signature payload (the
+  same as the lock gate) instead of the blob path. Path and payload agree for every writer.
+- **S3** — self-unregistration now reads (and ignores) legacy `-vlegacy.json` blobs under the
+  pilot's own occupancy prefix; more broadly, ANY blob under that prefix is now listed and
+  schema-validated, including non-canonical names the old path regex never matched and so
+  silently skipped. A malformed blob there surfaces as `500 DATA_SHAPE_INVALID`, as it
+  already does for lock and reflect.
+- **S4** — self-unregistration keys the occupancy ledger from the signature PAYLOAD
+  `teamId/place/pilotId`, not the blob path. A blob stored under the occupancy prefix whose
+  payload names a different team or place no longer blocks unregistration (the old lookup
+  trusted the path for team/place and only required `payload.pilotId` to match). No writer
+  produces such a blob: writers derive the path from the payload.

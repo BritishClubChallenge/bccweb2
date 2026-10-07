@@ -12,7 +12,10 @@ import { writePrivateJson } from "../lib/blobJson.js";
 import { trustedClientIp } from "../lib/clientIp.js";
 import { HttpError } from "../lib/http.js";
 import { rateLimit } from "../lib/rateLimit.js";
-import { getLatestSignature } from "../lib/signTofly/ledger.js";
+import {
+  readOccupancySignatureLedger,
+  type Occupancy,
+} from "../lib/signTofly/resolution.js";
 import { readRegistrationRound } from "./roundRegistrationData.js";
 import {
   clearRegistrationSlot,
@@ -54,13 +57,11 @@ export async function unregisterSelf(
     );
   }
 
-  const signature = await getLatestSignature(
-    roundId,
-    existing.team.id,
-    existing.slot.placeInTeam,
-    pilotId
-  );
-  if (signature) throwSignedContactCoordinator();
+  await assertNotSigned(roundId, {
+    teamId: existing.team.id,
+    place: existing.slot.placeInTeam,
+    pilotId,
+  });
 
   await withPrivateLease(`rounds/${roundId}.json`, async (leaseId) => {
     const lockedRound = await readRegistrationRound(roundId);
@@ -74,13 +75,11 @@ export async function unregisterSelf(
       );
     }
 
-    const lockedSignature = await getLatestSignature(
-      roundId,
-      lockedSlot.team.id,
-      lockedSlot.slot.placeInTeam,
-      pilotId
-    );
-    if (lockedSignature) throwSignedContactCoordinator();
+    await assertNotSigned(roundId, {
+      teamId: lockedSlot.team.id,
+      place: lockedSlot.slot.placeInTeam,
+      pilotId,
+    });
 
     clearRegistrationSlot(lockedSlot.slot);
     await writePrivateJson(
@@ -99,6 +98,14 @@ export async function unregisterSelf(
       removedFromPlace: existing.slot.placeInTeam,
     },
   };
+}
+
+async function assertNotSigned(
+  roundId: string,
+  occupancy: Occupancy
+): Promise<void> {
+  const ledger = await readOccupancySignatureLedger(roundId, occupancy);
+  if (ledger.hasSignedAnyVersion(occupancy)) throwSignedContactCoordinator();
 }
 
 function throwSignedContactCoordinator(): never {

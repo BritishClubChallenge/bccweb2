@@ -87,41 +87,26 @@ export async function listSignaturesForRound(roundId: string): Promise<Signature
   return signatures;
 }
 
-// Returns the newest signature made by THIS pilot for this team+place, or
-// null. The lookup is scoped by pilotId (#263): after a roster swap, a
-// former occupant's leftover signature blob must never block a different
-// occupant of the same slot, so blobs belonging to other pilots are never
-// considered. Legacy `-vlegacy.json` blobs carry no brief version and stay
-// ignored; a record whose payload pilotId does not match the filename is
-// skipped as defense-in-depth against foreign/manual writes. The remaining
-// tie — same pilot, same briefVersion override blobs differing only by
-// random suffix — picks arbitrarily, which is harmless because the sole
-// production caller (roundUnregistration.ts) only checks truthiness.
-export async function getLatestSignature(
+export async function listSignaturesForOccupancy(
   roundId: string,
   teamId: string,
   place: number,
   pilotId: string,
-): Promise<Signature | null> {
+): Promise<Signature[]> {
   const prefix = `${latestSignaturePathPattern(roundId, teamId, place)}${pilotId}-`;
-  let latest: Signature | null = null;
+  const signatures: Signature[] = [];
 
   for await (const item of getPrivateContainer().listBlobsFlat({ prefix })) {
-    const version = briefVersionFromPath(item.name);
-    if (version === null) continue;
-    const sig = await readJson(
-      getPrivateBlobClient(item.name),
-      SignatureLedgerSchema,
-      item.name,
+    signatures.push(
+      await readJson(
+        getPrivateBlobClient(item.name),
+        SignatureLedgerSchema,
+        item.name,
+      ),
     );
-    if (sig.pilotId !== pilotId) continue;
-    if (latest?.briefVersion !== null && latest?.briefVersion !== undefined && latest.briefVersion >= version) {
-      continue;
-    }
-    latest = sig;
   }
 
-  return latest;
+  return signatures;
 }
 
 export async function writeSignature(sig: Signature): Promise<void> {
@@ -186,12 +171,6 @@ function signatureWritePath(sig: Signature): string {
   return sig.briefVersion === null
     ? legacySignaturePath(sig.roundId, sig.teamId, sig.place, sig.pilotId)
     : signaturePath(sig.roundId, sig.teamId, sig.place, sig.pilotId, sig.briefVersion);
-}
-
-function briefVersionFromPath(path: string): number | null {
-  const match = /-v(\d+)(?:-override-[^.]+)?\.json$/.exec(path);
-  if (!match) return null;
-  return Number(match[1]);
 }
 
 function isMissingBlob(err: unknown): boolean {
